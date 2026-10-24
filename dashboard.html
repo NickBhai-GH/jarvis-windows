@@ -47,6 +47,7 @@ header { display: grid; grid-template-columns: auto 1fr auto; gap: 24px; align-i
 #meter-wrap { align-self: center; max-width: 420px; }
 #meter { height: 8px; background: var(--rule); position: relative; }
 #meter-fill { height: 100%; width: 0; background: var(--meter); }
+#meter-thresh { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--bad); }
 #meter-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
 
 .cols { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 40px; }
@@ -71,8 +72,6 @@ table { width: 100%; border-collapse: collapse; }
 th { text-align: left; font-weight: 600; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--rule-strong); padding: 4px 8px 4px 0; }
 td { border-bottom: 1px solid var(--rule); padding: 7px 8px 7px 0; vertical-align: top; }
 tr.turn { cursor: pointer; }
-button.expand { all: unset; cursor: pointer; }
-button.expand:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 tr.turn:hover td { background: var(--row); }
 tr.open td { background: var(--row); }
 tr.detail td { background: var(--row); padding: 4px 12px 16px; }
@@ -114,10 +113,10 @@ ul.plain li { border-bottom: 1px solid var(--rule); padding: 6px 0; font-size: 1
 <header>
   <div>
     <h1>Jarvis</h1>
-    <div id="conn" class="muted" role="status">Connecting...</div>
+    <div id="conn" class="muted">Connecting...</div>
   </div>
   <div id="meter-wrap">
-    <div id="meter" title="Microphone level"><div id="meter-fill"></div></div>
+    <div id="meter" title="Microphone level"><div id="meter-fill"></div><div id="meter-thresh"></div></div>
     <div id="meter-label">Microphone</div>
   </div>
   <div>
@@ -130,7 +129,6 @@ ul.plain li { border-bottom: 1px solid var(--rule); padding: 6px 0; font-size: 1
 <main>
   <section>
     <h2>Now</h2>
-    <div id="ask" role="alert"></div>
     <div id="now"></div>
   </section>
 
@@ -143,7 +141,7 @@ ul.plain li { border-bottom: 1px solid var(--rule); padding: 6px 0; font-size: 1
       <button type="button" class="plain" data-cmd="stop">Stop</button>
       <button type="button" class="plain" data-cmd="new" title="Update his notes, then start a clean conversation">New session</button>
     </form>
-    <div id="cmd-reply" role="status"></div>
+    <div id="cmd-reply"></div>
   </section>
 
   <section>
@@ -171,7 +169,6 @@ ul.plain li { border-bottom: 1px solid var(--rule); padding: 6px 0; font-size: 1
   <section>
     <h2>Today</h2>
     <dl class="facts" id="today"></dl>
-    <p class="muted" id="today-note" hidden>Counted from the most recent 1500 events only.</p>
   </section>
   <section>
     <h2>Session</h2>
@@ -195,9 +192,10 @@ ul.plain li { border-bottom: 1px solid var(--rule); padding: 6px 0; font-size: 1
 </div>
 
 <script>
+const TOKEN = "__TOKEN__";
 const $ = id => document.getElementById(id);
 let snap = null, history = [], procs = [], meter = {level: 0, wake: 0, activity: "idle"};
-let openTurns = new Set(), historyLimit = 40, dirty = false, connected = false, snapSeq = 0, shownAsk = null;
+let openTurns = new Set(), historyLimit = 40, dirty = false, connected = false;
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const clock = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
@@ -214,21 +212,28 @@ const TOOL_NAMES = {
   screenshot: "Screenshot", click_at: "Click", move_mouse: "Move mouse", scroll: "Scroll", type_text: "Type",
   press_keys: "Press keys", open_app: "Open app", list_apps: "List apps", open_path: "Open", media: "Media",
   volume: "Volume", list_windows: "List windows", focus_window: "Focus window", notify: "Notification",
-  run_command: "Command", write_file: "Write file", start_worker: "Start worker", list_workers: "List workers",
-  message_worker: "Message worker", stop_worker: "Stop worker",
+  Bash: "Command", Read: "Read file", Write: "Write file", Edit: "Edit file", Glob: "Find files", Grep: "Search files",
+  WebSearch: "Web search", WebFetch: "Fetch web page", ToolSearch: "Load tools", Agent: "Sub-agent", Task: "Sub-agent",
+  TodoWrite: "Plan", Skill: "Skill", navigate: "Chrome: go to page", computer: "Chrome: click/type",
+  read_page: "Chrome: read page", get_page_text: "Chrome: page text", find: "Chrome: find", form_input: "Chrome: fill form",
+  tabs_create_mcp: "Chrome: new tab", tabs_context_mcp: "Chrome: tabs", javascript_tool: "Chrome: run script",
 };
 function toolName(name) {
-  return TOOL_NAMES[name] || name.replace(/[_-]+/g, " ");
+  const short = name.split("__").pop();
+  if (TOOL_NAMES[short]) return TOOL_NAMES[short];
+  const server = name.startsWith("mcp__") ? name.split("__")[1].replace(/^claude_ai_/, "").replace(/_/g, " ") + ": " : "";
+  return server + short.replace(/[_-]+/g, " ");
 }
 function toolDetail(ev) {
   let inp = {};
-  try { inp = JSON.parse(ev.input) || {}; } catch (e) { return ev.input; }
-  const short = ev.name;
-  if (short === "run_command") return inp.description ? inp.description : inp.command;
+  try { inp = JSON.parse(ev.input); } catch (e) { return ev.input; }
+  const short = ev.name.split("__").pop();
+  if (ev.name === "Bash") return inp.description ? inp.description : inp.command;
   if (short === "click_at") return `at ${inp.x},${inp.y}${inp.clicks > 1 ? " (double)" : ""}${inp.button && inp.button !== "left" ? " " + inp.button : ""}`;
   if (short === "screenshot") return inp.target;
   if (short === "type_text") return `"${inp.text}"`;
   if (short === "press_keys") return inp.keys;
+  if (short === "ToolSearch") return "";
   for (const k of ["query", "name", "url", "file_path", "pattern", "description", "prompt", "text", "keys", "action", "target"])
     if (inp[k]) return String(inp[k]).slice(0, 200);
   return ev.input.slice(0, 160);
@@ -236,28 +241,10 @@ function toolDetail(ev) {
 
 // ---------- turns from the event log ----------
 function buildTurns() {
-  const turns = []; let cur = null; const byTool = {}, workers = {};
+  const turns = []; let cur = null; const byTool = {};
   for (const ev of history) {
     if (ev.kind === "session_reset") {
       turns.push({reset: ev, start: ev});
-      continue;
-    }
-    if (ev.kind === "worker") {            // each worker job is its own row, whatever Jarvis is doing meanwhile
-      let w = workers[ev.name];
-      if (ev.state === "running" && !w) {
-        w = workers[ev.name] = {start: ev, text: `The ${ev.name} worker`, source: "background", said: [], steps: [], shots: [], asks: [], end: null, first: null};
-        turns.push(w);
-      } else if (w && ["done", "failed", "stopped"].includes(ev.state) || (w && ev.state === "waiting" && !ev.asking)) {
-        if (ev.text) w.said.push(ev.text);
-        w.end = {ts: ev.ts, duration_s: ev.ts - w.start.ts, error: ev.state === "failed"};
-        delete workers[ev.name];
-      }
-      continue;
-    }
-    if (ev.sub && (ev.kind === "tool_use" || ev.kind === "screenshot")) {
-      const w = workers[ev.agent];
-      if (w && ev.kind === "tool_use") { const step = {ev, result: null}; w.steps.push(step); byTool[ev.tool_id] = step; }
-      else if (w) w.shots.push(ev);
       continue;
     }
     if (ev.kind === "turn_start") {
@@ -288,36 +275,32 @@ function buildTurns() {
 // ---------- rendering ----------
 function renderStatus() {
   const a = meter.activity || (snap && snap.activity) || "idle";
-  const words = {idle: "Idle", listening: "Listening", thinking: "Thinking", speaking: "Speaking", waiting: "Waiting for your yes or no"};
+  const words = {idle: "Idle", listening: "Listening", thinking: "Thinking", speaking: "Speaking", waiting: "Waiting for your yes or no", ready: "Update ready (waiting for a quiet moment on your call)"};
   const el = $("status");
   el.textContent = connected ? (words[a] || a) : "Not running";
   el.className = a === "waiting" ? "waiting" : (a === "idle" || !connected ? "" : "active");
   if (snap) $("status-sub").textContent = `Up for ${dur(Date.now() / 1000 - snap.started)}`;
   $("meter-fill").style.width = Math.round((meter.level || 0) * 100) + "%";
   const th = snap ? snap.config.wake_threshold : 0.5;
+  $("meter-thresh").style.left = "calc(" + (th * 100) + "% - 1px)";
   $("meter-label").textContent = `Microphone level. Wake word score ${Number(meter.wake || 0).toFixed(2)} (wakes at ${th})`;
 }
 
-function renderAsk() {                  // only redrawn when the question changes, so a focused Yes/No button keeps focus
-  const q = (snap && snap.question) || "";
-  if (q === shownAsk) return;
-  shownAsk = q;
-  $("ask").innerHTML = q ? `<div class="slip"><p>${esc(q)}</p>
-      <button type="button" data-cmd="yes">Yes</button> <button type="button" class="plain" data-cmd="no">No</button></div>` : "";
-}
-
 function renderNow(turns) {
-  renderAsk();
   const el = $("now");
-  const real = turns.filter(t => !t.reset && t.source !== "background");
+  const real = turns.filter(t => !t.reset);
   const last = real[real.length - 1];
   const active = last && !last.end ? last : null;
   let html = "";
+  if (snap && snap.question) {
+    html += `<div class="slip"><p>${esc(snap.question)}</p>
+      <button type="button" data-cmd="yes">Yes</button> <button type="button" class="plain" data-cmd="no">No</button></div>`;
+  }
   if (active) {
     const step = active.steps[active.steps.length - 1];
     const lastShot = active.shots[active.shots.length - 1];
     html += `<dl class="facts">
-      <dt>Request</dt><dd>${esc(active.text) || "(a worker reported back)"}</dd>
+      <dt>Request</dt><dd>${esc(active.text) || "(he started this himself)"}</dd>
       <dt>From</dt><dd>${sourceWord(active.source)}</dd>
       <dt>Working for</dt><dd class="num" data-since="${active.start.ts}">${dur(Date.now() / 1000 - active.start.ts)}</dd>
       <dt>Current step</dt><dd>${step ? esc(toolName(step.ev.name)) + (toolDetail(step.ev) ? ": " + esc(toolDetail(step.ev)) : "") + (step.result ? "" : " (running)") : "Thinking"}</dd>
@@ -332,17 +315,18 @@ function renderNow(turns) {
   el.innerHTML = html;
 }
 
-function sourceWord(s) { return {voice: "Voice", typed: "Typed", worker: "Worker update", background: "Background worker"}[s] || s; }
+function sourceWord(s) { return {voice: "Voice", typed: "Typed", self: "Started by itself"}[s] || s; }
 
 function renderWaiting() {
   const rows = [];
   const now = Date.now() / 1000;
   for (const t of (snap ? snap.tasks : [])) {
-    rows.push(`<tr><td>${esc(t.description)}</td><td>${esc(t.type || "Background task")}</td>
+    rows.push(`<tr><td>${esc(t.description)}</td><td>${esc({local_agent: "Sub-agent", local_bash: "Background command", remote_agent: "Remote agent"}[t.type] || t.type || "Background task")}</td>
       <td class="num">${clock(t.started)}</td><td class="num">${dur(now - t.started)} so far</td>
       <td>${t.last_tool ? "Last step: " + esc(toolName(t.last_tool)) : ""}</td></tr>`);
   }
-  for (const p of procs.filter(p => p.role === "job")) {
+  const taskCmds = (snap ? snap.tasks : []).map(t => t.description);
+  for (const p of procs.filter(p => p.role === "job" && !(snap && snap.tasks.some(t => t.type === "local_bash")))) {
     const left = p.ends ? `${dur(p.ends - now)} left` : `${dur(now - p.started)} so far`;
     rows.push(`<tr><td><code>${esc(p.label)}</code></td><td>Background command</td>
       <td class="num">${clock(p.started)}</td><td class="num">${left}</td><td></td></tr>`);
@@ -354,18 +338,18 @@ function renderWaiting() {
 }
 
 function renderHistory(turns) {
-  const real = turns.filter(t => !t.reset && t.source !== "background"), lastReal = real[real.length - 1];
+  const real = turns.filter(t => !t.reset), lastReal = real[real.length - 1];
   const done = turns.filter(t => t.reset || t.end || t !== lastReal).reverse();
   const shown = done.slice(0, historyLimit);
   $("more").hidden = done.length <= historyLimit;
   $("history").innerHTML = shown.map(t => {
     if (t.reset) return `<tr><td class="when num">${clock(t.reset.ts)}</td><td colspan="4" class="muted">New session started (${t.reset.reason === "idle" ? "after being idle" : "you asked"}). Notes updated first.</td></tr>`;
     const key = t.start.id, open = openTurns.has(key);
-    const took = t.end ? dur(t.end.duration_s) : t.source === "background" ? "running" : "stopped";
+    const took = t.end ? dur(t.end.duration_s) : "stopped";
     const reply = t.said.join(" ");
     let row = `<tr class="turn${open ? " open" : ""}" data-turn="${key}">
-      <td class="when num"><button type="button" class="expand" aria-expanded="${open}" title="Show every step">${clock(t.start.ts)}</button>${isToday(t.start.ts) ? "" : `<span class="src">${new Date(t.start.ts * 1000).toLocaleDateString()}</span>`}</td>
-      <td class="req">${esc(t.text) || '<span class="muted">(a worker reported back)</span>'}<span class="src">${sourceWord(t.source)}</span></td>
+      <td class="when num">${clock(t.start.ts)}${isToday(t.start.ts) ? "" : `<span class="src">${new Date(t.start.ts * 1000).toLocaleDateString()}</span>`}</td>
+      <td class="req">${esc(t.text) || '<span class="muted">(started by itself)</span>'}<span class="src">${sourceWord(t.source)}</span></td>
       <td>${esc(reply.length > 220 && !open ? reply.slice(0, 220) + "..." : reply) || '<span class="muted">(nothing)</span>'}${t.end && t.end.error ? ' <span class="bad">Ended with an error</span>' : ""}</td>
       <td class="num hide-narrow">${t.steps.length}</td><td class="num hide-narrow">${took}</td></tr>`;
     if (open) row += `<tr class="detail"><td colspan="5">${turnDetail(t)}</td></tr>`;
@@ -376,6 +360,7 @@ function renderHistory(turns) {
 function turnDetail(t) {
   let h = "<dl class='facts'>";
   if (t.first != null) h += `<dt>First word after</dt><dd class="num">${t.first}s</dd>`;
+  if (t.end) h += `<dt>Tokens</dt><dd class="num">${(t.end.tokens_in || 0).toLocaleString()} in, ${(t.end.tokens_out || 0).toLocaleString()} out</dd>`;
   for (const a of t.asks) {
     if (a.kind === "confirm_answer") h += `<dt>Asked you</dt><dd>${esc(a.question)} You said "${esc(a.answer || "nothing")}": ${a.approved ? '<span class="good">went ahead</span>' : '<span class="bad">did not</span>'}</dd>`;
     else h += `<dt>Refused</dt><dd class="bad">${esc(toolName(a.tool))}: ${esc(a.reason)}</dd>`;
@@ -389,21 +374,21 @@ function turnDetail(t) {
     }).join("") + "</ol>";
   }
   if (t.shots.length) h += "<div class='shots'>" + t.shots.map(s =>
-    `<figure><a href="/shots/${esc(s.file)}" target="_blank"><img loading="lazy" src="/shots/${esc(s.file)}" alt="Screenshot of ${esc(s.what)} at ${clock(s.ts)} (opens full size)"></a><figcaption>${clock(s.ts)}, ${esc(s.what)}</figcaption></figure>`).join("") + "</div>";
+    `<figure><a href="/shots/${esc(s.file)}" target="_blank"><img loading="lazy" src="/shots/${esc(s.file)}" alt=""></a><figcaption>${clock(s.ts)}, ${esc(s.what)}</figcaption></figure>`).join("") + "</div>";
   return h;
 }
 
 function renderToday(turns) {
-  const today = turns.filter(t => !t.reset && t.source !== "background" && isToday(t.start.ts));
-  $("today-note").hidden = !(history.length >= 1500 && isToday(history[0].ts));
+  const today = turns.filter(t => !t.reset && isToday(t.start.ts));
   const ended = today.filter(t => t.end);
   const firsts = today.filter(t => t.first != null).map(t => t.first);
   const avg = a => a.length ? (a.reduce((x, y) => x + y, 0) / a.length) : null;
   const evToday = history.filter(e => isToday(e.ts));
   const count = f => evToday.filter(f).length;
+  const tokens = ended.reduce((n, t) => n + (t.end.tokens_out || 0), 0);
   const firstAvg = avg(firsts), turnAvg = avg(ended.map(t => t.end.duration_s));
   $("today").innerHTML = `
-    <dt>Requests</dt><dd class="num">${today.length} (${today.filter(t => t.source === "voice").length} spoken, ${today.filter(t => t.source === "typed").length} typed, ${today.filter(t => t.source === "worker").length} worker updates)</dd>
+    <dt>Requests</dt><dd class="num">${today.length} (${today.filter(t => t.source === "voice").length} spoken, ${today.filter(t => t.source === "typed").length} typed, ${today.filter(t => t.source === "self").length} by himself)</dd>
     <dt>First word after</dt><dd class="num">${firstAvg != null ? firstAvg.toFixed(1) + "s on average" : "-"}</dd>
     <dt>Whole request</dt><dd class="num">${turnAvg != null ? dur(turnAvg) + " on average" : "-"}</dd>
     <dt>Steps taken</dt><dd class="num">${count(e => e.kind === "tool_use")}</dd>
@@ -411,16 +396,18 @@ function renderToday(turns) {
     <dt>Asked you</dt><dd class="num">${count(e => e.kind === "confirm_answer")} (you said no ${count(e => e.kind === "confirm_answer" && !e.approved)})</dd>
     <dt>Refused by rules</dt><dd class="num">${count(e => e.kind === "gate" && e.verdict === "deny")}</dd>
     <dt>You cut him off</dt><dd class="num">${count(e => e.kind === "barge_in" || e.kind === "stopped_by_user")}</dd>
-    `;
+    <dt>Tokens written</dt><dd class="num">${tokens.toLocaleString()}</dd>`;
 }
 
 function renderSession() {
   if (!snap) return;
   const c = snap.context || {}, b = snap.brain || {}, cfg = snap.config, sess = snap.session || {};
+  const mcp = (b.mcp || []).map(m => `${esc(m.name)}${m.status && m.status !== "connected" ? ` <span class="bad">(${esc(m.status)})</span>` : ""}`).join(", ");
   $("session").innerHTML = `
-    <dt>Model</dt><dd>${esc(b.model || cfg.model)} at ${esc(cfg.provider)}</dd>
-    <dt>Conversation</dt><dd class="num">${c.messages != null ? `${c.messages} messages` : "Shown after the first request"}</dd>
-    <dt>Tools</dt><dd class="num">${b.tools}</dd>
+    <dt>Model</dt><dd>${esc(b.model || cfg.model)}, ${esc(cfg.effort)} effort</dd>
+    <dt>Memory used</dt><dd class="num">${c.percentage != null ? `${Math.round(c.percentage)}% of context (${(c.totalTokens || 0).toLocaleString()} of ${(c.maxTokens || 0).toLocaleString()} tokens)` : "Shown after the first request"}</dd>
+    <dt>Tools</dt><dd class="num">${b.tools != null ? `${b.tools}, of which ${b.chrome_tools} are Chrome` : "Shown after the first request"}</dd>
+    <dt>Connectors</dt><dd>${mcp || "-"}</dd>
     <dt>This session</dt><dd class="num">${sess.resetting ? "Updating notes and starting fresh..." : `Started ${clock(sess.started)}, ${sess.turns} request${sess.turns === 1 ? "" : "s"}`}</dd>
     <dt>Fresh session</dt><dd>${sess.turns ? `After ${sess.reset_after_min} min with nothing going on (${idleLeft(sess)})` : "Already fresh"}</dd>
     <dt>Jarvis running since</dt><dd class="num">${clock(snap.started)}</dd>`;
@@ -435,7 +422,7 @@ function renderNotes() {
   if (!snap) return;
   const n = snap.notes || {};
   const updating = history.length && history[history.length - 1].kind === "notes" && history[history.length - 1].status === "updating";
-  $("notes-meta").textContent = updating ? "Updating now..." : n.updated ? `Saved in notes.md, last written ${ago(n.updated)}. Each new session starts by reading this.`
+  $("notes-meta").textContent = updating ? "Updating now..." : n.updated ? `Saved in ~/jarvis/JARVIS.md, last written ${ago(n.updated)}. Each new session starts by reading this.`
     : "Empty until his first session ends. Each new session starts by reading this.";
   const lines = (n.text || "").split("\n");
   let html = "", inList = false;
@@ -455,7 +442,7 @@ function renderNotes() {
 function renderEars() {
   if (!snap) return;
   const cfg = snap.config;
-  $("ears").innerHTML = `<dt>Microphone</dt><dd>${esc(cfg.mic)}</dd><dt>Speech to text</dt><dd>${esc(cfg.whisper)}</dd><dt>Voice</dt><dd>${esc(cfg.voice)}</dd>`;
+  $("ears").innerHTML = `<dt>Microphone</dt><dd>${esc(cfg.mic)}</dd><dt>Speech to text</dt><dd>Whisper ${esc(cfg.whisper)}</dd><dt>Voice</dt><dd>${esc(cfg.voice)}</dd>`;
   const heard = history.filter(e => e.kind === "wake" || e.kind === "heard").slice(-10).reverse();
   $("hearing").innerHTML = heard.map(e => e.kind === "wake"
     ? `<li><span class="num muted">${clock(e.ts)}</span> Woke (${esc(e.how)}${e.score ? ", score " + e.score : ""})</li>`
@@ -488,12 +475,8 @@ function schedule() { if (!dirty) { dirty = true; requestAnimationFrame(render);
 
 // ---------- data ----------
 async function loadSnapshot() {
-  const seq = ++snapSeq;
   const r = await fetch("/api/snapshot", {cache: "no-store"});
-  if (r.status === 403) { $("conn").textContent = await r.text(); return; }
-  const s = await r.json();
-  if (seq !== snapSeq) return;             // a newer request went out meanwhile: this answer is already stale
-  snap = s;
+  snap = await r.json();
   history = snap.history; procs = snap.procs; meter.activity = snap.activity;
   schedule();
 }
@@ -515,22 +498,22 @@ function connect() {
   };
 }
 
-async function send(cmd, text) {           // true once Jarvis has it
+async function send(cmd, text) {
   $("cmd-reply").textContent = "";
-  let r;
   try {
-    r = await fetch("/api/cmd", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({cmd, text})});
-  } catch (e) { $("cmd-reply").textContent = "Couldn't reach Jarvis. Is it running?"; return false; }
-  if (!r.ok) { $("cmd-reply").textContent = `Jarvis refused that (${r.status}): ${await r.text()}`; return false; }
-  const j = await r.json();
-  $("cmd-reply").textContent = j.reply === "ok" ? "" : j.reply;
-  return true;
+    const r = await fetch("/api/cmd", {method: "POST", headers: {"Content-Type": "application/json", "X-Jarvis-Token": TOKEN},
+      body: JSON.stringify({cmd, text})});
+    // Jarvis restarted since this tab loaded, so its token is stale: reload to pick up the new one.
+    if (r.status === 403) { $("cmd-reply").textContent = "Jarvis restarted, reloading..."; return setTimeout(() => location.reload(), 800); }
+    const j = await r.json();
+    $("cmd-reply").textContent = j.reply === "ok" ? "" : j.reply;
+  } catch (e) { $("cmd-reply").textContent = "Couldn't reach Jarvis."; }
 }
 
-$("cmd-form").addEventListener("submit", async e => {
+$("cmd-form").addEventListener("submit", e => {
   e.preventDefault();
-  const box = $("cmd-text"), t = box.value.trim();
-  if (t && await send("say", t) && box.value.trim() === t) box.value = "";   // a failed send keeps the draft
+  const t = $("cmd-text").value.trim();
+  if (t) { send("say", t); $("cmd-text").value = ""; }
 });
 document.addEventListener("click", e => {
   const b = e.target.closest("[data-cmd]");

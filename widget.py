@@ -1,15 +1,15 @@
-"""Jarvis desktop widget: a Dynamic Island style capsule, always on top and click-through, bottom centre of a monitor.
+"""Jarvis desktop widget: a glowing "emitter line" at the bottom centre of a monitor, always on top and click-through.
 
-Resting, it's a small dark pill with a dim mic (a collapsed Dynamic Island). It springs open when you start talking
-(wake word or hotkey), stays open while listening, thinking and speaking, and settles back into the pill a couple of
-seconds after Jarvis finishes. Background-work changes ("+1 in the background") and "Jarvis isn't running" open it for
-a few seconds too. One colour per state (design.COLORS), never mixed: listening, a mic that glows with your voice;
-thinking, a softly turning orb and a shimmer across the label; speaking, the capsule's whole edge glows (iOS 18 Siri
-style) as bright as Jarvis's voice; waiting for yes/no, an orange orb.
+At rest it draws nothing (if your wallpaper has a line there, line it up with LINE_W / LINE_UP below and it looks like
+the wallpaper's own line lighting up). When something happens the line lights up, one colour per state
+(design.COLORS), never mixed, and the words float above it with a soft dark glow on the glyphs only (no box, no blur):
+listening, white, rippling with your voice; thinking (or working by himself), cyan, a spark sweeping to and fro;
+speaking, blue, rippling with Jarvis's voice; waiting for yes/no, orange, breathing; an update held until your call
+goes quiet, green, breathing slower ("Update ready"); Jarvis not running, a dim red line. Background work at rest: a
+faint spark drifting along the line. It all fades away a couple of seconds after Jarvis finishes.
 The text: what you're saying (live), then what he's saying, sentence by sentence. Look: design.py.
-Windows can't blur behind a shape the way KDE does, so the capsule is a translucent dark fill instead.
 
-Run: .venv\\Scripts\\pythonw widget.py   (install.ps1 starts it at logon, next to Jarvis)
+Run: systemctl --user start jarvis-widget   (starts and stops with Jarvis)
 """
 import http.client
 import json
@@ -19,33 +19,41 @@ import sys
 import threading
 import time
 
+SYSTEM_PY = "/usr/bin/python3"
+if __name__ == "__main__" and sys.platform != "win32" and sys.executable != SYSTEM_PY:   # layer-shell needs the system Qt, not the venv's
+    os.execv(SYSTEM_PY, [SYSTEM_PY, os.path.abspath(__file__)])  # (see overlay.py); before any Qt loads
+
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QConicalGradient, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath,
-                           QPen, QPixmap, QRadialGradient)
+from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
+                           QPixmap, QRadialGradient)
 from PySide6.QtWidgets import QApplication, QWidget
 
 import config
 import design as d
+import overlay
 
 TITLE = "Jarvis Widget"
-CAP_W = 600                                   # expanded capsule width
-CAP_MAX_H = 132
-PAD_X, PAD_TOP, PAD_BOTTOM = 22, 20, 26       # room around the capsule for its shadow and edge glow
-W, H = CAP_W + 2 * PAD_X, CAP_MAX_H + PAD_TOP + PAD_BOTTOM
+LINE_W, LINE_UP = 660, 19            # the line's length, and its height above the screen's bottom edge (in pixels)
+GLOW = 40                            # room either side for the line's glow
+W, H = LINE_W + 2 * GLOW, 160        # the window, bottom centre of the screen: the line plus the words above it
+LINE_X0, LINE_X1, LY = GLOW, GLOW + LINE_W, H - LINE_UP + 0.5     # the line, in window pixels (LY: its centre row)
+TEXT_X0, TEXT_X1, TEXT_BOTTOM = LINE_X0 + 30, LINE_X1 - 30, LY - 11.5   # the words sit just above it
 PORT = 8765
-TOKEN_FILE = os.path.join(config.JARVIS_DIR, "logs", "ctl.token")
-ACTIVE = ("listening", "thinking", "speaking", "waiting")   # open while these last; a small pill otherwise
-REST_W, REST_H = 112, 32                      # the resting pill (a collapsed Dynamic Island)
-LINGER_S = 2.5                                # stays up this long after he finishes, then tucks away
+ACTIVE = ("listening", "thinking", "speaking", "waiting", "ready")   # lit while these last
+LINGER_S = 2.5                                # stays up this long after he finishes, then fades away
 NOTE_S = 4.0                                  # background-work / offline notes show this long
 
 LABELS = {"idle": "Idle", "listening": "Listening", "thinking": "Thinking", "speaking": "Jarvis",
-          "waiting": "Say yes or no", "offline": "Jarvis isn't running"}
+          "waiting": "Say yes or no", "ready": "Update ready", "offline": "Jarvis isn't running"}
 TOOL_NAMES = {"screenshot": "looking at the screen", "click_at": "clicking", "move_mouse": "moving the mouse",
               "scroll": "scrolling", "type_text": "typing", "press_keys": "pressing keys", "open_app": "opening an app",
               "focus_window": "switching windows", "list_windows": "checking windows", "media": "media controls",
-              "volume": "volume", "run_command": "running a command", "write_file": "writing a file",
-              "start_worker": "starting a worker", "annotate": "pointing on screen"}
+              "volume": "volume", "Bash": "running a command", "Read": "reading a file", "Write": "writing a file",
+              "Edit": "editing a file", "Grep": "searching files", "Glob": "finding files", "WebSearch": "searching the web",
+              "WebFetch": "reading a web page", "ToolSearch": "loading tools", "Agent": "sub-agent working",
+              "navigate": "opening a page in Chrome", "computer": "working in Chrome", "read_page": "reading the page",
+              "get_page_text": "reading the page", "find": "searching the page", "form_input": "filling a form",
+              "annotate": "pointing on screen"}
 
 
 def short_dur(sec):
@@ -55,16 +63,16 @@ def short_dur(sec):
 
 def describe_step(ev):
     """'Command: Check the weather' rather than just 'running a command'."""
-    short = ev["name"]
+    short = ev["name"].split("__")[-1]
     name = TOOL_NAMES.get(short, short.replace("_", " "))
     try:
         inp = json.loads(ev.get("input") or "{}")
     except ValueError:
         inp = {}
     detail = inp.get("description") or inp.get("query") or inp.get("url") or inp.get("name") or ""
-    if short == "write_file" and inp.get("path"):
-        detail = os.path.basename(inp["path"])
-    if short in ("screenshot", "click_at", "move_mouse", "scroll", "annotate"):
+    if short in ("Read", "Write", "Edit") and inp.get("file_path"):
+        detail = os.path.basename(inp["file_path"])
+    if short in ("ToolSearch", "screenshot", "click_at", "move_mouse", "scroll", "annotate"):
         detail = ""
     name = name[0].upper() + name[1:]
     return f"{name}: {detail}" if detail else name
@@ -74,14 +82,13 @@ class Feed(QObject):
     """Asks Jarvis what's happening several times a second (a tiny local request, about 2 ms)."""
     event = Signal(dict)
 
-    token = ""
-
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
 
-    def _get(self, path):
+    @staticmethod
+    def _get(path):
         c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=3)
-        c.request("GET", path, headers={"Host": f"127.0.0.1:{PORT}", "X-Jarvis-Token": self.token})
+        c.request("GET", path, headers={"Host": f"127.0.0.1:{PORT}"})
         r = c.getresponse()
         body = r.read()
         c.close()
@@ -94,10 +101,6 @@ class Feed(QObject):
             try:
                 if use_live:
                     status, body = self._get("/api/live")
-                    if status == 403:          # Jarvis made a new key (first start): read it again
-                        with open(TOKEN_FILE) as f:
-                            self.token = f.read().strip()
-                        status, body = self._get("/api/live")
                     if status == 404:
                         use_live = False       # an older Jarvis without /api/live: use the full status instead
                         continue
@@ -131,21 +134,28 @@ def from_snapshot(snap):
     return {"activity": snap.get("activity", "idle"), "mic": 0, "out": 0, "question": snap.get("question") or "",
             "tasks": snap.get("tasks", []), "you": (heard[-1]["text"] if heard else "") if snap.get("question")
             else turn.get("text") or (heard[-1]["text"] if heard else ""), "said": said, "step": step,
-            "self_started": turn.get("source") == "worker"}
+            "self_started": turn.get("source") == "self"}
 
 
-def place_window(w):
-    """The monitor from config, inside the taskbar, with the capsule's outer edge WIDGET_MARGIN_* from the screen edge
-    (the window is a little bigger than the capsule, for its shadow and edge glow)."""
+def pick_screen():
+    """The monitor from config."""
     screens = sorted(QApplication.screens(), key=lambda s: s.geometry().x())
-    s = {"left": screens[0], "right": screens[-1]}.get(config.WIDGET_SCREEN) or next(
-        (x for x in screens if x.name() == config.WIDGET_SCREEN), screens[0])
-    g, corner = s.availableGeometry(), config.WIDGET_CORNER
-    x = (g.right() + 1 - W - config.WIDGET_MARGIN_X + PAD_X if corner.endswith("right")
-         else g.left() + config.WIDGET_MARGIN_X - PAD_X if corner.endswith("left") else g.center().x() - W // 2)
-    y = (g.top() + config.WIDGET_MARGIN_Y - PAD_TOP if corner.startswith("top")
-         else g.bottom() + 1 - H - config.WIDGET_MARGIN_Y + PAD_BOTTOM)
-    w.move(x, y)
+    return {"left": screens[0], "right": screens[-1]}.get(config.WIDGET_SCREEN) or next(
+        (s for s in screens if s.name() == config.WIDGET_SCREEN), screens[0])
+
+
+def soft_glow(pm, spread=4):
+    """A dark, soft copy of what's on pm (its glyphs' silhouette, blurred by scaling down and back up)."""
+    img = pm.toImage().convertToFormat(QImage.Format_ARGB32_Premultiplied)
+    q = QPainter(img)
+    q.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    q.fillRect(img.rect(), QColor(2, 8, 10))
+    q.end()
+    w, h = img.width(), img.height()
+    small = img.scaled(w // spread, h // spread, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    out = QPixmap.fromImage(small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+    out.setDevicePixelRatio(pm.devicePixelRatio())
+    return out
 
 
 class Widget(QWidget):
@@ -157,7 +167,8 @@ class Widget(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(W, H)
-        self.activity = ""                # unknown until the first poll, so starting with Jarvis off still says so
+        self.activity = "offline"
+        self.hue = "offline"              # the line's colour: the last state that lit it (so it fades out in it)
         self.mic = self.out = 0.0         # smoothed levels
         self.mic_raw = self.out_raw = 0.0
         self.you = ""                     # what you said (live, then final)
@@ -170,17 +181,17 @@ class Widget(QWidget):
         self.linger_until = 0.0           # stays up this long after he finishes
         self.note_until = 0.0             # a background-work or offline note shows until then
         self.task_ids = frozenset()
-        self.font_label = d.font(12, QFont.DemiBold)
-        self.font_text = d.font(15)
-        self.font_small = d.font(13)
-        self.font_pill = d.font(14, QFont.Medium)
-        self.cap_w, self.cap_h = d.Spring(CAP_W), d.Spring(64)
-        self.presence = d.Spring(0)       # 0 = the small resting pill, 100 = fully open (springs both ways)
-        self.content = None               # what's on show: (label, text, dim, footer, lines, compact)
+        self.font_label = d.font(13, families=d.MONO)
+        self.font_label.setLetterSpacing(QFont.AbsoluteSpacing, 3)
+        self.font_text = d.font(21, QFont.Medium, d.HUD)
+        self.font_small = d.font(18, QFont.Medium, d.HUD)
+        self.presence = 0.0               # the words: 0 = gone, 1 = up (eases both ways)
+        self.lit = 0.0                    # the line: 0 = not drawn, 1 = lit
+        self.content = None               # what's on show: (label, text, dim, footer, lines)
         self.content_key = None
         self.content_t0 = 0.0             # when the current kind of content appeared (for its fade-in)
         self.last_key = None
-        self.glass_key = self.glass_pm = None
+        self.words_key = self.words_pm = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(16)
@@ -206,7 +217,7 @@ class Widget(QWidget):
                 self.note_until = time.time() + NOTE_S
 
     def compose(self, now):
-        """What to show: (label, text, dim, footer, task_lines, compact). Same wording as always."""
+        """What to show: (label, text, dim, footer, task_lines). Same wording as always."""
         a = self.activity
         label, text, dim, footer, lines = LABELS.get(a, a), "", False, "", None
         if self.tasks and a != "idle" and now < self.note_until:
@@ -214,7 +225,7 @@ class Widget(QWidget):
         if a == "listening":
             label, text = "You", self.you or "..."
         elif a == "thinking":
-            label = "Worker update" if self.self_started else "Thinking"
+            label = "Working by himself" if self.self_started else "Thinking"
             if self.step:
                 text = self.step
             else:
@@ -233,8 +244,11 @@ class Widget(QWidget):
             text, dim = "Say “Hey Jarvis”", True
         elif a == "offline":
             text, dim = "Jarvis isn't running", True
-        compact = a in ("idle", "offline") and not lines and label != "Jarvis"
-        return label, text, dim, footer, lines, compact
+        elif a == "ready":                    # an update held for a quiet moment on your call
+            text = "Update ready"
+        if a in ("idle", "offline", "ready") and not lines and label != "Jarvis":
+            label, text = text, ""            # a short note: just the one line, in the label's style
+        return label, text, dim, footer, lines
 
     def tick(self):
         now = time.time()
@@ -245,310 +259,171 @@ class Widget(QWidget):
             setattr(self, name, cur + (raw - cur) * (0.5 if raw > cur else 0.12))
         if self.activity in ACTIVE:
             self.linger_until = now + LINGER_S
+        if self.activity != "idle":
+            self.hue = self.activity
         show = self.activity in ACTIVE or now < self.linger_until or now < self.note_until
-        self.presence.target = 100 if show else 0
-        if show or self.content is None:   # while tucking away, keep showing what was there
+        lit = self.activity in ACTIVE or self.activity == "offline"
+        for name, target in (("presence", 1.0 if show else 0.0), ("lit", 1.0 if lit else 0.0)):
+            v = getattr(self, name)
+            v += (target - v) * min(1.0, dt * 9)                   # eases in or out over about a third of a second
+            setattr(self, name, target if abs(target - v) < 0.01 else v)
+        if show or self.content is None:   # while fading away, keep showing what was there
             self.content = self.compose(now)
-        key = (self.content[0], self.content[5])
-        if key != self.content_key:
-            self.content_key, self.content_t0 = key, now
-        self.cap_w.target, self.cap_h.target = self.target_size(self.content)
-        for spring in (self.cap_w, self.cap_h, self.presence):
-            spring.step(dt)
-        if not show and not self.presence.moving:      # resting pill: still, so only redraw if it changes
-            key = ("rest", self.activity == "offline", bool(self.tasks))
-            if key != self.last_key:
-                self.last_key = key
-                self.update()
-            self.timer.setInterval(100)
-            return
-        # Full 60 fps only while it morphs or follows a voice; the orb alone (thinking, waiting) repaints just its
-        # own corner at 30 fps; a note that just sits there only repaints when its text changes (saves CPU).
-        morphing = (self.cap_w.moving or self.cap_h.moving or self.presence.moving or now - self.content_t0 < 0.4)
-        voice = self.activity in ("listening", "speaking")
-        orb_only = not (morphing or voice) and (self.activity in ("thinking", "waiting") or bool(self.content[4]))
-        key = (self.content, int(now // 30))
-        if morphing or voice or key != self.last_key:
-            self.last_key = key
+        if self.content[0] != self.content_key:
+            self.content_key, self.content_t0 = self.content[0], now
+        # Full 60 fps while it fades or follows a voice or a sweep; breathing and the drifting background spark repaint
+        # just the line at 30 fps; otherwise only when something changes (saves CPU). At rest it draws nothing at all.
+        fading = 0 < self.presence < 1 or 0 < self.lit < 1 or now - self.content_t0 < 0.3
+        fast = fading or (self.lit and self.activity in ("listening", "speaking", "thinking"))
+        slow = not fast and ((self.lit and self.activity in ("waiting", "ready")) or (self.tasks and not self.lit))
+        key = (self.content if self.presence else None, round(self.presence, 2), round(self.lit, 2))
+        if fast or key != self.last_key:
             self.update()
-        elif orb_only:
-            cap = self.capsule()
-            self.update(QRectF(cap.left() - 4, cap.top(), 66, min(cap.height(), 64)).toAlignedRect())
-            if self.activity == "thinking":                     # the shimmering label
-                self.update(QRectF(cap.left(), cap.top(), cap.width(), 34).toAlignedRect())
-        self.timer.setInterval(16 if morphing or voice else 33 if orb_only else 100)
-
-    # ---------- layout ----------
-
-    def bare(self, content):
-        """Speaking (and the moment after) has no icon: the capsule's glowing edge is the voice."""
-        return self.activity == "speaking" or (self.activity == "idle" and content[0] == "Jarvis")
-
-    def target_size(self, content):
-        label, text, dim, footer, lines, compact = content
-        if compact:
-            fm = QFontMetricsF(self.font_pill)
-            return min(CAP_W, 44 + fm.horizontalAdvance(text) + 20), 40
-        body = (len(lines) * 20) if lines else self.text_height(text, self.bare(content))
-        h = 14 + 16 + 4 + body + (20 if footer else 0) + 14
-        return CAP_W, max(64, min(CAP_MAX_H, h))
-
-    def text_height(self, text, bare):
-        if not text:
-            return 0
-        fm = QFontMetricsF(self.font_text)
-        r = fm.boundingRect(QRectF(0, 0, CAP_W - (44 if bare else 80), 1000), Qt.TextWordWrap, text)
-        return min(r.height(), 3 * fm.lineSpacing())
-
-    def capsule(self):
-        pr = max(0.0, self.presence.value / 100)
-        w = REST_W + (self.cap_w.value - REST_W) * pr       # opens out of the resting pill, and settles back into it
-        h = REST_H + (self.cap_h.value - REST_H) * pr
-        corner = config.WIDGET_CORNER
-        x = W - PAD_X - w if corner.endswith("right") else PAD_X if corner.endswith("left") else (W - w) / 2
-        y = PAD_TOP if corner.startswith("top") else H - PAD_BOTTOM - h
-        return QRectF(x, y, w, h)
+        elif slow:
+            self.update(0, int(LY) - 24, W, H - int(LY) + 24)
+        self.last_key = key
+        self.timer.setInterval(16 if fast else 33 if slow else 100)
 
     # ---------- drawing ----------
 
     def paintEvent(self, _):
-        if not self.content:
-            return
         p = QPainter(self)
         p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
-        cap = self.capsule()
-        radius = min(d.RADIUS_ISLAND, cap.height() / 2)
-        path = QPainterPath()
-        path.addRoundedRect(cap, radius, radius)
-        p.drawPixmap(0, 0, self.glass(cap, path))
-        if self.activity == "speaking":
-            self.draw_edge_glow(p, cap, path)
-        if self.presence.value < 40:                         # resting (or nearly): just a dim mic
-            self.draw_rest(p, cap, d.clamp01(1 - self.presence.value / 40))
-        if self.presence.value < 60:                         # too small for words yet
-            return
-        p.save()
-        p.setClipPath(path)
-        p.setOpacity(p.opacity() * d.ease_out((time.time() - self.content_t0) / 0.28)
-                     * d.clamp01((self.presence.value - 60) / 30))
-        label, text, dim, footer, lines, compact = self.content
-        if compact:
-            self.draw_compact(p, cap, text)
-        else:
-            self.draw_expanded(p, cap, label, text, dim, footer, lines)
-        p.restore()
+        self.draw_line(p)
+        if self.content and self.presence:
+            p.setOpacity(self.presence * d.ease_out((time.time() - self.content_t0) / 0.28))
+            p.drawPixmap(0, 0, self.words())
 
-    def glass(self, cap, path):
-        """The capsule itself (shadow, translucent dark glass, sheen, hairline), redrawn only when its size changes."""
-        key = (round(cap.x(), 1), round(cap.y(), 1), round(cap.width(), 1), round(cap.height(), 1))
-        if key != self.glass_key:
+    def draw_line(self, p):
+        """The emitter line in the state's colour: rippling with a voice, a spark sweeping to and fro while thinking,
+        breathing while it waits. At rest only a faint spark drifts along it while background work runs."""
+        a, t = self.activity, time.time() - self.t0
+        x0, half = LINE_X0, LINE_W / 2
+        cx = x0 + half
+        if self.tasks and self.lit < 1:                           # background work, under everything else
+            k = 0.55 * (1 - self.lit)
+            self.draw_spark(p, cx + half * 0.8 * math.sin(t * 0.45), 46, d.color("background"), k, LY)
+        if not self.lit:
+            return
+        c, k = d.color(self.hue), self.lit
+        level = self.mic if self.hue == "listening" else self.out if self.hue == "speaking" else 0.0
+        if self.hue in ("waiting", "ready"):
+            k *= 0.6 + 0.4 * math.sin(t * (3.0 if self.hue == "waiting" else 1.5))
+        elif self.hue == "offline":
+            k *= 0.45
+        # the line itself: pinned at both ends, rippling in the middle with the voice
+        amp = (1.2 + 14 * level) if self.hue in ("listening", "speaking") else 0.0
+        path = QPainterPath(QPointF(x0, LY))
+        for i in range(1, 121):
+            u = i / 60 - 1
+            wave = 0.6 * math.sin(u * 13 + t * 9) + 0.4 * math.sin(u * 29 - t * 14)
+            path.lineTo(cx + u * half, LY + amp * (1 - u * u) ** 2 * wave)
+        g = QLinearGradient(x0, 0, x0 + 2 * half, 0)
+        g.setColorAt(0, d.alpha(c, 0))
+        g.setColorAt(0.5, c)
+        g.setColorAt(1, d.alpha(c, 0))
+        p.setBrush(Qt.NoBrush)
+        for width, a_ in ((12, 0.07), (6, 0.16), (2.6, 0.45), (1.2, 1.0)):      # wide and faint to thin and bright
+            p.setOpacity(k * a_)
+            p.setPen(QPen(QBrush(g), width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPath(path)
+        p.setOpacity(1)
+        # the spark: a bright core on the line, wider with the voice; it sweeps while he thinks
+        sx = cx + half * 0.82 * math.sin(t * 1.7) if self.hue == "thinking" else cx
+        self.draw_spark(p, sx, 130 * (1 + 1.4 * level), c, k * (0.75 + 0.25 * level), LY)
+
+    @staticmethod
+    def draw_spark(p, x, length, c, k, y):
+        """A short bright dash with a pool of light spilling under it."""
+        p.save()
+        p.translate(x, y + 2)
+        p.scale(1, 0.07)                                          # a flat ellipse of light
+        pool = QRadialGradient(QPointF(0, 0), length * 1.4)
+        pool.setColorAt(0, d.alpha(c, 0.30 * k))
+        pool.setColorAt(1, d.alpha(c, 0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(pool)
+        p.drawEllipse(QPointF(0, 0), length * 1.4, length * 1.4)
+        p.restore()
+        hot = QColor(c).lighter(130)
+        g = QLinearGradient(x - length / 2, 0, x + length / 2, 0)
+        g.setColorAt(0, d.alpha(hot, 0))
+        g.setColorAt(0.5, d.alpha(QColor(255, 255, 255), k))
+        g.setColorAt(1, d.alpha(hot, 0))
+        for width, a_ in ((7, 0.25), (2, 1.0)):
+            p.setPen(QPen(QBrush(g), width, Qt.SolidLine, Qt.RoundCap))
+            p.setOpacity(a_)
+            p.drawLine(QPointF(x - length / 2, y), QPointF(x + length / 2, y))
+        p.setOpacity(1)
+
+    def words(self):
+        """The words with a soft dark glow behind the glyphs only (no plate), redrawn only when they change."""
+        key = (self.content, self.activity)
+        if key != self.words_key:
             dpr = self.devicePixelRatioF()
             pm = QPixmap(round(W * dpr), round(H * dpr))
             pm.setDevicePixelRatio(dpr)
             pm.fill(Qt.transparent)
             q = QPainter(pm)
-            q.setRenderHint(QPainter.Antialiasing)
-            d.shadow(q, path)
-            q.fillPath(path, d.ISLAND)
-            sheen = QLinearGradient(cap.topLeft(), QPointF(cap.left(), cap.top() + min(40, cap.height())))
-            sheen.setColorAt(0, QColor(255, 255, 255, 14))
-            sheen.setColorAt(1, QColor(255, 255, 255, 0))
-            q.fillPath(path, sheen)
-            q.setPen(QPen(d.HAIRLINE, 1))
-            q.drawPath(path)
+            q.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+            self.draw_words(q, *self.content)
             q.end()
-            self.glass_key, self.glass_pm = key, pm
-        return self.glass_pm
+            out = QPixmap(pm.size())
+            out.setDevicePixelRatio(dpr)
+            out.fill(Qt.transparent)
+            q = QPainter(out)
+            for spread in (8, 4, 4):                              # a wide soft halo, then a tighter one
+                q.drawPixmap(0, 0, soft_glow(pm, spread))
+            q.drawPixmap(0, 0, pm)
+            q.end()
+            self.words_key, self.words_pm = key, out
+        return self.words_pm
 
-    def draw_edge_glow(self, p, cap, path):
-        """iOS 18 Siri style: soft light running round the whole edge, as bright as Jarvis's voice is loud."""
-        t = time.time() - self.t0
-        c = d.color("speaking")
-        g = QConicalGradient(cap.center(), -t * 110)      # one colour; two brighter arcs chase round the edge
-        for pos, a in ((0, 1.0), (0.18, 0.25), (0.5, 0.85), (0.68, 0.2), (1, 1.0)):
-            g.setColorAt(pos, d.alpha(c, a))
-        level = 0.35 + 0.65 * self.out
-        base = p.opacity()
-        p.setBrush(Qt.NoBrush)
-        for width, a in ((14, 0.12), (8, 0.25), (3.5, 0.55), (1.5, 0.95)):   # wide and faint to thin and bright
-            p.setOpacity(base * a * level)
-            p.setPen(QPen(g, width))
-            p.drawPath(path)
-        p.setOpacity(base)
-
-    def draw_rest(self, p, cap, k):
-        """The resting pill: a tiny dim mic in the middle, plus a faint dot while background work runs."""
-        c = cap.center()
-        col = d.alpha(d.LABEL, (0.22 if self.activity == "offline" else 0.42) * k)
-        p.setPen(Qt.NoPen)
-        p.setBrush(col)
-        p.drawRoundedRect(QRectF(c.x() - 2.6, c.y() - 7, 5.2, 8.6), 2.6, 2.6)
-        p.setPen(QPen(col, 1.3, Qt.SolidLine, Qt.RoundCap))
-        p.setBrush(Qt.NoBrush)
-        cradle = QPainterPath()
-        cradle.moveTo(c.x() - 4.6, c.y() - 1.6)
-        cradle.cubicTo(c.x() - 4.6, c.y() + 4.6, c.x() + 4.6, c.y() + 4.6, c.x() + 4.6, c.y() - 1.6)
-        p.drawPath(cradle)
-        p.drawLine(QPointF(c.x(), c.y() + 3.2), QPointF(c.x(), c.y() + 6.2))
-        if self.tasks:
-            p.setPen(Qt.NoPen)
-            p.setBrush(d.alpha(d.color("background"), 0.55 * k))
-            p.drawEllipse(QPointF(cap.right() - 16, c.y()), 2.5, 2.5)
-
-    def draw_compact(self, p, cap, text):
-        self.draw_orb(p, QPointF(cap.left() + 22, cap.center().y()), 9)
-        p.setFont(self.font_pill)
-        p.setPen(d.TERTIARY if self.activity == "offline" else d.SECONDARY)
-        r = QRectF(cap.left() + 40, cap.top(), cap.width() - 54, cap.height())
-        p.drawText(r, Qt.AlignLeft | Qt.AlignVCenter, p.fontMetrics().elidedText(text, Qt.ElideRight, int(r.width())))
-
-    def draw_expanded(self, p, cap, label, text, dim, footer, lines):
-        a, t = self.activity, time.time() - self.t0
-        icon = QPointF(cap.left() + 31, cap.top() + 32)
-        if self.bare(self.content):
-            left = cap.left() + 22
-        elif a == "listening":
-            self.draw_mic(p, icon)
-            left = cap.left() + 62
-        else:
-            self.draw_orb(p, icon, 13)
-            left = cap.left() + 62
-        top, right = cap.top() + 14, cap.right() - 22
-        p.setFont(self.font_label)
-        label_rect = QRectF(left, top, right - left, 16)
-        if a == "thinking":                                   # a soft highlight sweeping across the label
-            x = label_rect.left() + ((t * 0.55) % 1.6 - 0.3) * 260
-            g = QLinearGradient(x - 60, 0, x + 60, 0)
-            base = d.alpha(d.LABEL, 0.55)
-            g.setColorAt(0, base)
-            g.setColorAt(0.5, d.LABEL)
-            g.setColorAt(1, base)
-            p.setPen(QPen(g, 1))
-        elif a == "idle" and lines:
-            p.setPen(d.color("background"))
-        else:
-            p.setPen(d.SECONDARY if a in ("speaking", "idle") else d.color(a))
-        p.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter,
-                   p.fontMetrics().elidedText(label, Qt.ElideRight, int(label_rect.width())))
-        body_top = top + 20
-        bottom = cap.bottom() - 14 - (20 if footer else 0)
+    def draw_words(self, p, label, text, dim, footer, lines):
+        """Centred over the line, bottom up: footer, then the text (or the task lines), then the label."""
+        a = self.activity
+        left, right, bottom = TEXT_X0, TEXT_X1, TEXT_BOTTOM
+        width = right - left
+        if footer:
+            p.setFont(self.font_label)
+            p.setPen(d.alpha(d.color("background"), 0.75))
+            p.drawText(QRectF(left, bottom - 16, width, 16), Qt.AlignCenter, footer.upper())
+            bottom -= 20
         if lines:
             p.setFont(self.font_small)
             fm = p.fontMetrics()
-            for i, (dur, desc) in enumerate(lines):
-                y = body_top + i * 20
-                p.setPen(d.SECONDARY)
-                p.drawText(QRectF(left, y, 56, 20), Qt.AlignLeft | Qt.AlignVCenter, dur)
+            for i, (dur, desc) in enumerate(reversed(lines)):
+                row = QRectF(left, bottom - 22 * (i + 1), width, 22)
                 p.setPen(d.LABEL)
-                p.drawText(QRectF(left + 60, y, right - left - 60, 20), Qt.AlignLeft | Qt.AlignVCenter,
-                           fm.elidedText(desc, Qt.ElideRight, int(right - left - 60)))
+                p.drawText(row, Qt.AlignCenter, fm.elidedText(f"{dur}   {desc}", Qt.ElideRight, int(width)))
+            bottom -= 22 * len(lines) + 2
         elif text:
             p.setFont(self.font_text)
+            flags = Qt.AlignHCenter | Qt.AlignBottom | Qt.TextWordWrap
+            box = QRectF(left, bottom - 3 * p.fontMetrics().lineSpacing(), width, 3 * p.fontMetrics().lineSpacing())
+            shown = self.fit(p, text, box)
             p.setPen(d.SECONDARY if dim else d.LABEL)
-            box = QRectF(left, body_top, right - left, bottom - body_top)
-            p.drawText(box, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, self.fit(p, text, box, a == "waiting"))
-        if footer:
+            p.drawText(box, flags, shown)
+            bottom -= p.boundingRect(box, flags, shown).height() + 2
+        if label:
             p.setFont(self.font_label)
-            p.setBrush(d.color("background"))
-            p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(left + 3, cap.bottom() - 22), 3, 3)
-            p.setPen(d.alpha(d.color("background"), 0.75))
-            p.drawText(QRectF(left + 12, cap.bottom() - 30, right - left, 16), Qt.AlignLeft | Qt.AlignVCenter, footer)
-
-    def draw_mic(self, p, c):
-        """SF Symbols style mic.fill on a disc; only the mic glows, pulsing with your voice."""
-        t, level, blue = time.time() - self.t0, self.mic, d.color("listening")
-        p.setPen(Qt.NoPen)
-        halo_r = 17 + 16 * level
-        halo = QRadialGradient(c, halo_r)
-        halo.setColorAt(0, d.alpha(blue, 0.30 + 0.45 * level))
-        halo.setColorAt(1, d.alpha(blue, 0))
-        p.setBrush(halo)
-        p.drawEllipse(c, halo_r, halo_r)
-        phase = (t % 1.4) / 1.4                                   # a ripple leaving the disc while you talk
-        if level > 0.05:
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(d.alpha(blue, 0.6 * level * (1 - phase)), 1.5))
-            p.drawEllipse(c, 15 + 10 * phase, 15 + 10 * phase)
-            p.setPen(Qt.NoPen)
-        r = 15 * (1 + 0.06 * level)
-        disc = QRadialGradient(c - QPointF(0, r * 0.5), r * 1.6)
-        disc.setColorAt(0, blue.lighter(125))
-        disc.setColorAt(1, blue.darker(115))
-        p.setBrush(disc)
-        p.drawEllipse(c, r, r)
-        s = r / 15                                                # the glyph: capsule, cradle, stem, foot
-        p.setBrush(d.on(blue))
-        p.drawRoundedRect(QRectF(c.x() - 3.6 * s, c.y() - 8.2 * s, 7.2 * s, 11 * s), 3.6 * s, 3.6 * s)
-        pen = QPen(d.on(blue), 1.7 * s, Qt.SolidLine, Qt.RoundCap)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-        cradle = QPainterPath()
-        cradle.moveTo(c.x() - 6 * s, c.y() - 1.5 * s)
-        cradle.cubicTo(c.x() - 6 * s, c.y() + 6.5 * s, c.x() + 6 * s, c.y() + 6.5 * s, c.x() + 6 * s, c.y() - 1.5 * s)
-        p.drawPath(cradle)
-        p.drawLine(QPointF(c.x(), c.y() + 4.6 * s), QPointF(c.x(), c.y() + 8 * s))
-        p.drawLine(QPointF(c.x() - 3.2 * s, c.y() + 8 * s), QPointF(c.x() + 3.2 * s, c.y() + 8 * s))
-
-    def draw_orb(self, p, c, r):
-        """The orb: Jarvis's face. It swirls while thinking and breathes while waiting for an answer."""
-        a, t = self.activity, time.time() - self.t0
-        if a in ("thinking", "waiting"):
-            r *= 1 + 0.05 * math.sin(t * 2.4)                 # breathing
-        if a == "offline":
-            p.setPen(QPen(d.alpha(d.GREY, 0.7), 1.5, Qt.DashLine))
-            p.setBrush(Qt.NoBrush)
-            p.drawEllipse(c, r, r)
-            return
-        lit = a != "idle" or bool(self.tasks)
-        base = d.color("background" if a == "idle" and self.tasks else a)
-        p.setPen(Qt.NoPen)
-        if lit:                                               # a soft, quiet glow
-            halo = QRadialGradient(c, r * 1.9)
-            halo.setColorAt(0, d.alpha(base, 0.32))
-            halo.setColorAt(1, d.alpha(base, 0))
-            p.setBrush(halo)
-            p.drawEllipse(c, r * 1.9, r * 1.9)
-        if a == "thinking":                                   # a soft disc
-            g = QRadialGradient(c, r)
-            g.setColorAt(0, d.alpha(base, 0.95))
-            g.setColorAt(1, d.alpha(base, 0.55))
-        else:
-            g = QRadialGradient(c - QPointF(r * 0.2, r * 0.3), r * 1.25)
-            g.setColorAt(0, base.lighter(150) if lit else QColor(150, 150, 158))
-            g.setColorAt(0.55, base if lit else QColor(96, 96, 104))
-            g.setColorAt(1, base.darker(160) if lit else QColor(58, 58, 64))
-        p.setBrush(g)
-        p.drawEllipse(c, r, r)
-        if a == "thinking":                                   # with a thin highlight circling it
-            p.setPen(QPen(d.alpha(base, 0.75), 1.6, Qt.SolidLine, Qt.RoundCap))
-            p.setBrush(Qt.NoBrush)
-            p.drawArc(QRectF(c.x() - r - 4, c.y() - r - 4, 2 * r + 8, 2 * r + 8), int(-t * 220 * 16) % 5760, 80 * 16)
-            return
-        gloss = QRadialGradient(c - QPointF(0, r * 0.45), r * 0.8)  # a glassy highlight on top
-        gloss.setColorAt(0, QColor(255, 255, 255, 38))
-        gloss.setColorAt(1, QColor(255, 255, 255, 0))
-        p.setBrush(gloss)
-        p.drawEllipse(c, r, r)
-        if self.tasks and a == "idle":                        # background work: an amber dot circling the orb
-            ang = t * 1.6
-            p.setBrush(d.color("background"))
-            p.drawEllipse(c + QPointF(math.cos(ang), math.sin(ang)) * (r + 6), 2.5, 2.5)
+            p.setPen(d.alpha(d.LABEL, 0.6) if label == "Jarvis" and a == "idle"
+                     else d.color("background" if a == "idle" and lines else a).lighter(130))   # small type: a touch brighter
+            p.drawText(QRectF(left, bottom - 18, width, 18), Qt.AlignCenter,
+                       p.fontMetrics().elidedText(label.upper(), Qt.ElideRight, int(width)))
 
     @staticmethod
-    def fit(p, text, box, keep_start=False):
-        """Show the END of long text (the newest words), trimmed from the front; a yes/no question keeps its START
-        (what it would do, and to what), trimmed from the end."""
+    def fit(p, text, box):
+        """Show the END of long text (the newest words), trimmed from the front."""
         flags = Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap
         if p.boundingRect(box, flags, text).height() <= box.height():
             return text
-        words, shown = text.split(), text
+        words = text.split()
         while len(words) > 1:
-            words.pop(-1 if keep_start else 0)
-            shown = " ".join(words) + " ..." if keep_start else "... " + " ".join(words)
-            if p.boundingRect(box, flags, shown).height() <= box.height():
+            words.pop(0)
+            if p.boundingRect(box, flags, "... " + " ".join(words)).height() <= box.height():
                 break
-        return shown
+        return "... " + " ".join(words)
 
 
 def main():
@@ -556,7 +431,12 @@ def main():
     app.setApplicationName("jarvis-widget")
     app.setDesktopFileName("jarvis-widget")
     w = Widget()
-    place_window(w)
+    screen = pick_screen()
+    ls = overlay.layer_surface(w, screen, overlay.BOTTOM)   # bottom centre, pinned, never takes focus
+    overlay._set_zone(ls, -1)                                 # ignore any panel: measured from the screen's very bottom
+    if sys.platform == "win32":                               # no layer shell: sit just above the taskbar ourselves
+        g = screen.availableGeometry()
+        w.move(g.x() + (g.width() - W) // 2, g.y() + g.height() - H)
     feed = Feed()
     feed.event.connect(w.on_event)
     w.show()

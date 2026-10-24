@@ -1,30 +1,82 @@
-"""Jarvis's "show me where" overlay: rings, arrows, boxes and callouts drawn over every monitor.
+"""Jarvis's "show me where" overlay: rings, arrows, boxes and callouts drawn over both monitors.
 
-One see-through, always-on-top, click-through window per monitor that never takes focus. pctools.annotate starts
-it with the shapes (already in desktop pixels) as JSON; it fades out by itself after `duration` seconds, or is
-ended at once by clear_annotations / a newer drawing. It can't draw over exclusive-fullscreen games (borderless works).
+One see-through window per monitor, made a KDE layer-shell surface on the overlay layer, so it sits above
+normal and fullscreen windows, takes no keyboard focus and lets every click through. pctools.annotate starts
+it with the shapes (already in desktop pixels) as JSON; it fades out by itself after `duration` seconds, or
+when terminated (clear_annotations / a newer drawing).
 
-Look: design.py (one colour: COLORS['annotate']). Shapes scale and fade in, staggered; rings pulse gently.
-A label is "Title" or "Title\\ndetail" and becomes a translucent pill with a short pointer at its shape.
+Look: design.py (iOS dark mode, one colour: COLORS['annotate']). Shapes scale and fade in, staggered; rings pulse gently.
+A label is "Title" or "Title\\ndetail" and becomes a frosted pill with a short pointer at its shape.
 
-Try it (desktop pixels; one JSON argument):
-    .venv\\Scripts\\python overlay.py "{\\"duration\\": 5, \\"shapes\\": [{\\"type\\": \\"ring\\", \\"x\\": 960, \\"y\\": 540, \\"radius\\": 60, \\"label\\": \\"Here\\"}]}"
+Runs on the system python (/usr/bin/python3): its PySide6 uses the system Qt, which KDE's layer-shell-qt
+library is built for. The venv's pip PySide6 bundles its own Qt and can't load it.
+
+Try it: /usr/bin/python3 overlay.py '{"duration": 5, "shapes": [{"type": "ring", "x": 960, "y": 540, "radius": 60,
+         "label": "Here", "step": 1}]}'
 """
+import ctypes
 import json
 import math
-import os
 import signal
 import sys
 import time
 
-# Shapes come in physical desktop pixels (what screenshots and clicks use), so Qt works in those too.
-os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
+import shiboken6
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QRegion
+from PySide6.QtWidgets import QApplication, QWidget
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen  # noqa: E402
-from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
+import design as d
 
-import design as d  # noqa: E402
+TOP, BOTTOM, LEFT, RIGHT = 1, 2, 4, 8          # layer-shell anchors
+
+
+def _ptr(obj):
+    return shiboken6.getCppPointer(obj)[0]
+
+
+if sys.platform == "win32":
+    # Windows: the window flags already make it topmost, click-through and focus-free; callers place it themselves.
+    def layer_surface(widget, screen, anchors=None, margins=None):
+        widget.setScreen(screen)
+
+    def _set_zone(ls, zone):
+        pass
+
+    def _blur(window, on, region):              # no compositor blur hook here: the pills stay plain dark glass
+        pass
+else:
+    # KDE's layer-shell-qt has no Python binding, so call its four setters directly (C++ names, plain pointer args).
+    _ls = ctypes.CDLL("libLayerShellQtInterface.so.6")
+    _get = _ls._ZN12LayerShellQt6Window3getEP7QWindow
+    _get.restype, _get.argtypes = ctypes.c_void_p, [ctypes.c_void_p]
+    _set_layer = _ls._ZN12LayerShellQt6Window8setLayerENS0_5LayerE
+    _set_keyboard = _ls._ZN12LayerShellQt6Window24setKeyboardInteractivityENS0_21KeyboardInteractivityE
+    _set_zone = _ls._ZN12LayerShellQt6Window16setExclusiveZoneEi
+    _set_screen = _ls._ZN12LayerShellQt6Window9setScreenEP7QScreen
+    _set_anchors = _ls._ZN12LayerShellQt6Window10setAnchorsE6QFlagsINS0_6AnchorEE
+    _set_margins = _ls._ZN12LayerShellQt6Window10setMarginsERK8QMargins
+    for f in (_set_layer, _set_keyboard, _set_zone, _set_anchors):
+        f.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    for f in (_set_screen, _set_margins):
+        f.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    LAYER_OVERLAY, KEYBOARD_NONE = 3, 0
+
+    def layer_surface(widget, screen, anchors=TOP | BOTTOM | LEFT | RIGHT, margins=None):
+        """Make a QWidget a layer-shell surface on the overlay layer of `screen`: above fullscreen windows, and it can
+        never take keyboard focus. Call before show(). Anchors pin it to screen edges; margins are QMargins from them."""
+        widget.winId()                              # create the native window so layer-shell can claim it
+        ls = _get(_ptr(widget.windowHandle()))
+        _set_layer(ls, LAYER_OVERLAY)
+        _set_keyboard(ls, KEYBOARD_NONE)
+        _set_screen(ls, _ptr(screen))
+        _set_anchors(ls, anchors)
+        if margins is not None:
+            _set_margins(ls, _ptr(margins))
+        return ls
+    # KWin's blur behind the pills (real frosted glass), same trick: KWindowEffects::enableBlurBehind.
+    _blur = ctypes.CDLL("libKF6WindowSystem.so.6")._ZN14KWindowEffects16enableBlurBehindEP7QWindowbRK7QRegion
+    _blur.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_void_p]
 
 STROKE, BADGE_R, GAP, POINTER = 3.0, 10.0, 10.0, 7.0
 ACCENT = d.color("annotate")
@@ -71,11 +123,11 @@ class Shape:
         tw = tf.horizontalAdvance(self.title)
         dw = df.horizontalAdvance(self.detail) if self.detail else 0
         lead = 2 * BADGE_R + 8 if self.step else 0
-        scr = QApplication.screenAt(anchor.center().toPoint()) or QApplication.primaryScreen()
-        g = QRectF(scr.geometry()).adjusted(12, 12, -12, -12)              # stay on the shape's monitor
-        w = min(g.width(), 28 + lead + max(tw, dw))                         # a too-long label is cut short, not off-screen
+        w = 28 + lead + max(tw, dw)
         h = 18 + tf.height() + (df.height() + 1 if self.detail else 0)
         box = QRectF(0, 0, w, max(h, 2 * BADGE_R + 18))
+        scr = QApplication.screenAt(anchor.center().toPoint()) or QApplication.primaryScreen()
+        g = QRectF(scr.geometry()).adjusted(12, 12, -12, -12)              # stay on the shape's monitor
         if below is None:                                                  # centred on an arrow's tail
             box.moveCenter(anchor.center())
         else:
@@ -191,14 +243,12 @@ class Shape:
         y = box.center().y() - text_h / 2
         p.setFont(fonts[0])
         p.setPen(d.LABEL)
-        room = box.right() - 14 - x
-        p.drawText(QRectF(x, y, box.right() - x, tf.height()), Qt.AlignLeft | Qt.AlignVCenter,
-                   tf.elidedText(self.title, Qt.ElideRight, room))
+        p.drawText(QRectF(x, y, box.right() - x, tf.height()), Qt.AlignLeft | Qt.AlignVCenter, self.title)
         if self.detail:
             p.setFont(fonts[1])
             p.setPen(d.SECONDARY)
             p.drawText(QRectF(x, y + tf.height() + 1, box.right() - x, df.height()), Qt.AlignLeft | Qt.AlignVCenter,
-                       df.elidedText(self.detail, Qt.ElideRight, room))
+                       self.detail)
         p.restore()
 
     def paint_badge(self, p, at, scale, shadow=False):
@@ -228,10 +278,22 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setScreen(screen)
-        self.setGeometry(screen.geometry())               # whole monitor, over the taskbar too
+        self.setGeometry(screen.geometry())
+        _set_zone(layer_surface(self, screen), -1)        # whole monitor, over the taskbar too
         mine = QRectF(screen.geometry())
         self.dirty = [s.extent.translated(-self.origin.x(), -self.origin.y()).toAlignedRect()
                       for s in shapes if s.extent.intersects(mine)]
+        self.glass = QRegion()
+        for s in shapes:
+            if s.pill and s.pill[0].intersects(mine):
+                self.glass += QRegion(s.pill[1].translated(-self.origin.x(), -self.origin.y()).toFillPolygon().toPolygon())
+        self.blurred = False
+
+    def blur(self, on):
+        """Blur what's behind the pills once they're in; drop it as they fade out."""
+        if on != self.blurred and not self.glass.isEmpty():
+            self.blurred = on
+            _blur(_ptr(self.windowHandle()), on, _ptr(self.glass))
 
     def animate(self):
         for r in self.dirty:                       # repaint only around the shapes, not the whole monitor
@@ -249,6 +311,9 @@ class Overlay(QWidget):
 
 def main():
     spec = json.loads(sys.argv[1])
+    if sys.platform == "win32":                    # shapes arrive in real pixels: keep Qt from rescaling them for DPI
+        import os
+        os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
     app = QApplication(sys.argv[:1])
     app.setApplicationName("jarvis-overlay")
     fonts = (d.font(15, QFont.DemiBold), d.font(13), d.font(12, QFont.Bold))
@@ -264,16 +329,19 @@ def main():
     def fade_now(*_):
         state["out"] = min(state["out"], time.monotonic() - start)
 
-    signal.signal(signal.SIGTERM, fade_now)       # where the OS sends SIGTERM: fade out rather than vanish
+    signal.signal(signal.SIGTERM, fade_now)       # clear_annotations: fade out rather than vanish
     windows = [Overlay(s, shapes, clock) for s in app.screens()]
     for w in windows:
         w.show()
+
+    settled = max(s.delay for s in shapes) + 0.08 + d.FADE_IN
 
     def tick():
         t = clock()[0]
         if t > state["out"] + d.FADE_OUT + 0.05:
             app.quit()
         for w in windows:
+            w.blur(settled <= t < state["out"])
             w.animate()
 
     timer = QTimer()

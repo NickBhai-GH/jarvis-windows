@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>JARVIS OS</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>
+html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#030c0d;color:#e9f5f5;font-family:Barlow,sans-serif;user-select:none;cursor:default}
+a{color:inherit;text-decoration:none;cursor:pointer}
+#stage{position:absolute;inset:0;background:radial-gradient(circle 520px at 960px 360px,rgba(46,160,168,.26),rgba(22,96,102,.12) 50%,transparent 80%),radial-gradient(ellipse 1500px 1000px at 960px 380px,#0a2629 0%,#06181a 45%,#030c0d 80%)}
+.deco{position:absolute;inset:0;pointer-events:none}
+.dot{position:absolute;border-radius:50%;background:#9beef4}
+.col{position:absolute;width:560px;display:flex;flex-direction:column;overflow:hidden}
+.hd{display:flex;align-items:baseline;gap:14px;padding:0 12px 10px}
+.hd b{font:600 15px 'Barlow Condensed';letter-spacing:.16em;color:#6fc4cb}
+.hd span{font:400 15px Barlow;color:#7e9ea0}
+.row{display:flex;align-items:baseline;gap:12px;padding:8px 12px;border-top:1px solid rgba(110,200,205,.10)}
+a.row:hover,a.music:hover,a.core:hover{background:rgba(79,216,228,.07)}
+.sample .row{opacity:.5}
+.mono{font-family:'JetBrains Mono',monospace}
+.t{font:400 13px 'JetBrains Mono';color:#6c8a8c;white-space:nowrap}
+.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.who{font:600 16px Barlow;color:#e9f5f5;white-space:nowrap}
+.grp{font:600 13px Barlow;color:#6fc4cb;padding:10px 12px 4px}
+.amber{color:#f3ad45}.red{color:#ff6a5c}.cyan{color:#4fd8e4}.glow{text-shadow:0 0 10px rgba(79,216,228,.55)}
+.mute{color:#7e9ea0}.dim{color:#6c8a8c}.teal{color:#6fc4cb}.orange{color:#f5874f}
+.av{width:26px;height:26px;border-radius:50%;box-sizing:border-box;border:1.5px solid rgba(110,200,205,.25);background:#0b2224;display:flex;align-items:center;justify-content:center;font:600 11px 'Barlow Condensed';color:#c4d8d9}
+.av.live{border-color:#4fd8e4}
+.clamp{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden}
+.nav{width:30px;height:30px;padding:0;border-radius:50%;border:1.5px solid rgba(110,200,205,.25);background:#0b2224;color:#6fc4cb;font:500 18px/1 Barlow;cursor:pointer}
+.nav:hover{border-color:#4fd8e4;color:#e9f5f5}
+.bar{flex:1;height:2px;background:rgba(110,200,205,.15)}.bar i{display:block;height:2px;background:#4fd8e4}
+@keyframes spin { to { transform: rotate(360deg); } }
+/* game mode: no Slack, Asana or calls; Discord, Steam and Twitch take their room */
+.game #slack,.game #today,.game .workline{display:none}
+.game #discord{top:44px!important;height:650px!important}.game #steam{top:712px!important;height:350px!important}.game #twitch{top:44px!important;height:456px!important}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="deco" id="dots"></div>
+  <!-- the Jarvis widget's resting emitter line (widget.py LINE_W / LINE_UP: 660 px wide, 19 px up); the widget draws on top -->
+  <svg class="deco" width="1920" height="1080">
+    <defs>
+      <linearGradient id="emit"><stop offset="0" stop-color="#62d6ff" stop-opacity="0"/><stop offset=".5" stop-color="#e8f9ff" stop-opacity=".9"/><stop offset="1" stop-color="#62d6ff" stop-opacity="0"/></linearGradient>
+      <filter id="b30" x="-50%" y="-500%" width="200%" height="1100%"><feGaussianBlur stdDeviation="30"/></filter>
+      <filter id="b14" x="-50%" y="-500%" width="200%" height="1100%"><feGaussianBlur stdDeviation="14"/></filter>
+    </defs>
+    <ellipse cx="960" cy="1063" rx="420" ry="22" fill="#62d6ff" opacity=".16" filter="url(#b30)"/>
+    <ellipse cx="960" cy="1063" rx="190" ry="6" fill="#62d6ff" opacity=".35" filter="url(#b14)"/>
+    <rect x="630" y="1061" width="660" height="1" fill="url(#emit)"/>
+  </svg>
+  <svg class="deco" width="1920" height="1080">
+    <g fill="none" stroke="rgba(79,216,228,.42)" stroke-width="1">
+      <polyline id="slackP" points="330,54 654,54 753.5,153.5"/><polyline class="workline" id="steamP" points="318,510 630,510 684.2,455.8"/>
+      <polyline id="discordP" points="372,722 630,722 770.1,581.9"/><polyline points="1322,54 1266,54 1166.5,153.5"/>
+      <polyline points="1322,520 1302,520 1236.3,454.3"/><polyline class="workline" points="1306,852 1306,706 1166.5,566.5"/>
+    </g>
+    <g fill="#030c0d" stroke="#4fd8e4" stroke-width="1">
+      <circle cx="753.5" cy="153.5" r="3"/><circle class="workline" cx="684.2" cy="455.8" r="3"/><circle cx="770.1" cy="581.9" r="3"/>
+      <circle cx="1166.5" cy="153.5" r="3"/><circle cx="1236.3" cy="454.3" r="3"/><circle class="workline" cx="1166.5" cy="566.5" r="3"/>
+    </g>
+  </svg>
+
+  <div class="col" id="slack" style="left:40px;top:44px;height:450px"></div>
+  <div class="col" id="steam" style="left:40px;top:500px;height:200px"></div>
+  <div class="col" id="discord" style="left:40px;top:712px;height:350px"></div>
+
+  <div style="position:absolute;left:660px;top:60px;width:600px;height:600px">
+    <svg id="ring" width="600" height="600" viewBox="0 0 600 600" style="position:absolute;inset:0;overflow:visible"></svg>
+    <!-- the slow spinner is its own layer turned by a CSS transform, so a step never re-renders the ring's glow filters -->
+    <svg class="spin" data-dur="48" width="600" height="600" style="position:absolute;inset:0;will-change:transform;pointer-events:none">
+      <defs><filter id="sbloom" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+      <circle cx="300" cy="300" r="186" fill="none" stroke="#4fd8e4" stroke-width="2" pathLength="360" stroke-dasharray="28 332" filter="url(#sbloom)"/>
+    </svg>
+    <a class="core" id="core" style="position:absolute;left:130px;top:130px;width:340px;height:340px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px"></a>
+  </div>
+
+  <div id="sys" style="position:absolute;left:660px;top:716px;width:600px;display:flex;flex-direction:column;gap:14px">
+    <div style="display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:24px;padding-bottom:14px;border-bottom:1px solid rgba(110,200,205,.10)">
+      <span style="display:flex;flex-direction:column;gap:2px"><span id="clock" style="font:500 24px 'JetBrains Mono';color:#e9f5f5"></span><span id="date" style="font:400 15px Barlow;color:#a7c0c1"></span></span>
+      <span style="display:flex;flex-direction:column;gap:2px"><span id="temp" style="font:500 24px 'JetBrains Mono';color:#e9f5f5"></span><span id="wx" style="font:400 15px Barlow;color:#a7c0c1"></span></span>
+      <span id="load" style="display:flex;flex-direction:column;gap:6px;padding-top:4px"></span>
+    </div>
+    <a class="music" id="music" style="display:flex;align-items:center;gap:16px;padding:4px 0;min-height:44px"></a>
+  </div>
+
+  <div class="col" id="today" style="left:1320px;top:44px;height:456px"></div>
+  <div class="col" id="workers" style="left:1320px;top:510px;height:322px"></div>
+  <div class="col" id="twitch" style="left:1320px;top:842px;height:220px"></div>
+  <!-- x 630-1290, y 930-1080 stays empty: the Jarvis voice widget draws its line and words there -->
+</div>
+
+<script>
+const DAY_START = 8;             // the day ring covers 12 hours from this hour (08:00 to 20:00, in the mode's zone)
+const A = '#f3ad45', R = '#ff6a5c', C = '#4fd8e4';
+const D = {};
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const pad = n => String(n).padStart(2, '0');
+// every time shown is in the mode's zone (MODE_TZ in jarvis_os.py), sent by jarvis_os.py with the mode
+let TZ;
+const fmt = (d, o) => new Intl.DateTimeFormat('en-GB', {timeZone: TZ, hourCycle: 'h23', ...o}).format(d);
+const hm = d => fmt(d, {hour: '2-digit', minute: '2-digit'});
+const hours = d => fmt(d, {hour: '2-digit', minute: '2-digit', second: '2-digit'}).split(':').reduce((a, v) => a * 60 + +v) / 3600;
+const mmss = s => (s = Math.max(0, Math.round(s)), s >= 3600 ? `${Math.floor(s / 3600)}:${pad(Math.floor(s % 3600 / 60))}:${pad(s % 60)}` : `${Math.floor(s / 60)}:${pad(s % 60)}`);
+const link = (href, cls, inner, style = '') => `<a class="${cls}" ${href ? `href="${esc(href)}"` : ''} style="${style}">${inner}</a>`;
+
+const game = () => document.body.classList.contains('game');
+function anchor(el) {               // left callout lines start just after their header text
+  const p = $((game() ? {discord: 'slack', steam: 'discord'}[el.id] : el.id) + 'P');
+  if (!p || !el.offsetParent) return;
+  const pts = p.getAttribute('points').split(' ');
+  pts[0] = Math.ceil(el.querySelector('.hd span').getBoundingClientRect().right + 16) + ',' + pts[0].split(',')[1];
+  p.setAttribute('points', pts.join(' '));
+}
+function hd(el, label, sub, f) {
+  if (f && !f.ok) sub = 'unavailable';
+  else if (f && f.sample) sub += ', <span class="amber">sample data, no token yet</span>';
+  el.classList.toggle('sample', !!(f && f.sample));
+  return `<div class="hd"><b>${label}</b><span>${sub}</span></div>`;
+}
+function fit(col, list) {            // drop whole rows that don't fit, never half a row
+  anchor(col);
+  while (col.scrollHeight > col.clientHeight + 1 && list.lastElementChild) list.lastElementChild.remove();
+}
+
+// ---------------------------------------------------------------- left column
+function slack(f) {
+  const el = $('slack');
+  el.innerHTML = hd(el, 'SLACK', `${f.unread ?? 0} unread${f.waiting ? `, <span class="amber">${f.waiting} waiting on you</span>` : ''}`, f) + '<div id="slackL"></div>';
+  $('slackL').innerHTML = (f.ok ? f.items : []).map(m => link(m.href, 'row', `
+    <span style="display:flex;flex-direction:column;gap:3px;flex:1;min-width:0">
+      <span style="display:flex;align-items:baseline;gap:10px">
+        <span class="who ${m.wait ? 'amber' : ''}">${esc(m.who)}</span>
+        <span class="ell ${m.wait ? 'amber' : 'mute'}" style="font:400 14px Barlow">${esc(m.where)}</span>
+        <span class="t" style="margin-left:auto">${esc(m.time)}</span>
+      </span>
+      <span style="font:400 16px/1.35 Barlow;color:#c4d8d9;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(m.text)}</span>
+    </span>`, 'padding:10px 12px')).join('');
+  fit(el, $('slackL'));
+}
+
+function dmRow(m) {
+  return link(m.href, 'row', `<span class="who amber">${esc(m.who)}</span>
+    <span class="ell" style="font:400 15px Barlow;color:#c4d8d9;flex:1">${esc(m.text)}</span><span class="t">${esc(m.time)}</span>`, 'gap:10px');
+}
+
+function steam(f) {
+  const el = $('steam');
+  el.innerHTML = hd(el, 'STEAM', `${f.online ?? 0} friend${f.online === 1 ? '' : 's'} online${f.dms ? `, <span class="amber">${f.dms.length} unread</span>` : ''}`, f) + '<div id="steamL"></div>';
+  $('steamL').innerHTML = f.ok ? f.friends.map(g => link(g.href, 'row', `
+    <span class="who ell" style="min-width:64px;max-width:170px">${esc(g.name)}</span>
+    <span class="ell ${g.playing ? 'cyan glow' : 'mute'}" style="font:400 15px Barlow;flex:1">${esc(g.game)}</span>
+    <span class="t">${esc(g.t)}</span>`, 'padding:7px 12px')).join('') + (f.dms || []).map(dmRow).join('') : '';
+  fit(el, $('steamL'));
+  if (game()) gameCore($('core'));
+}
+
+function discord(f) {
+  const el = $('discord');
+  const dms = f.ok ? f.dms : [], ment = f.ok ? f.mentions : [], act = f.ok ? f.active : [];
+  const unread = dms.filter(d => d.unread).length;
+  const sub = `${unread} unread${act.length ? `, <span class="cyan">${act.length} active</span>` : ''}`;
+  el.innerHTML = hd(el, 'DISCORD', sub, f) + '<div id="discordL"></div>';
+  // cap each kind so DMs never crowd out mentions or the friends who are active; fit() trims any that still overflow
+  const dmRows = dms.slice(0, 5).map(d => link(d.href, 'row', `
+    <span class="who ell ${d.unread ? 'amber' : ''}" style="max-width:150px">${esc(d.who)}</span>
+    <span class="ell" style="font:400 15px Barlow;color:${d.unread ? '#c4d8d9' : '#7e9ea0'};flex:1">${esc(d.text)}</span>
+    <span class="t">${esc(d.time)}</span>`, 'gap:10px'));
+  const mRows = ment.slice(0, 3).map(m => link(m.href, 'row', `
+    <span class="who ell amber" style="max-width:130px">${esc(m.who)}</span>
+    <span class="ell" style="font:400 15px Barlow;color:#c4d8d9;flex:1">${esc(m.text)}${m.where ? ` <span class="mute" style="font-size:13px">${esc(m.where)}</span>` : ''}</span>
+    <span class="t">${esc(m.time)}</span>`, 'gap:10px'));
+  const aRows = act.slice(0, game() ? 10 : 4).map(a => link(a.href, 'row', `
+    <span class="who ell" style="max-width:150px">${esc(a.who)}</span>
+    <span class="ell ${a.streaming || a.playing ? 'cyan glow' : 'mute'}" style="font:400 15px Barlow;flex:1">${esc(a.line)}</span>`, 'padding:7px 12px'));
+  $('discordL').innerHTML = [...dmRows, ...mRows, ...aRows].join('');
+  fit(el, $('discordL'));
+  if (game()) gameCore($('core'));
+}
+
+// ---------------------------------------------------------------- right column
+function today() {
+  const f = D.asana, cal = D.calendar, el = $('today');
+  if (!f) return;
+  const now = Date.now() / 1000;
+  const evs = cal && cal.ok ? cal.events.filter(e => e.end > now).slice(0, 2) : [];
+  el.innerHTML = hd(el, 'TODAY', `${f.open ?? 0} for today${f.overdue ? `, <span class="red">${f.overdue} overdue</span>` : ''}`, f) + '<div id="todayL"></div><div id="todayE"></div>';
+  // grouped by due date; labels and rows are siblings so fit() trims row by row
+  const st = t => `<span style="margin-left:auto;font:500 14px Barlow;white-space:nowrap" class="${{Blocked: 'amber', 'In progress': 'teal', Triage: 'orange'}[t.status] || 'mute'}">${esc(t.status)}</span>
+        <span class="t ${t.late ? 'red' : ''}">${esc(t.due)}</span>`;
+  $('todayL').innerHTML = (f.ok ? f.groups : []).map(g => `<div class="grp ${g.label === 'Overdue' ? 'red' : ''}">${esc(g.label)}</div>` + g.tasks.map(t => link(t.href, 'row', `
+    <span style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0">
+      <span style="display:flex;align-items:baseline;gap:10px">
+        <span class="t" style="color:#7e9ea0">${esc(t.id)}</span>
+        <span class="ell" style="font:400 14px Barlow;color:#a7c0c1">${esc(t.client)}</span>
+        ${st(t)}
+      </span>
+      <span class="ell" style="font:500 16px Barlow;color:#e9f5f5">${esc(t.task)}</span>
+    </span>`, 'padding:6px 12px')).join('')).join('');
+  $('todayE').innerHTML = evs.map(e => link(e.href, 'row', `
+    <span class="cyan" style="font:400 13px 'JetBrains Mono';width:44px">${hm(new Date(e.start * 1000))}</span>
+    <span class="ell" style="font:400 15px Barlow;color:#c4d8d9">${esc(e.title)}</span>`, 'gap:14px')).join('');
+  fit(el, $('todayL'));
+  while ($('todayL').lastElementChild?.classList.contains('grp')) $('todayL').lastElementChild.remove();
+}
+
+// one worker at a time; Jarvis taking a request, or a worker that starts waiting on you, jumps to the front,
+// otherwise your pick sticks
+let wSel = '', wAsked = new Set();
+function wStep(d) {
+  const items = D.workers.items, i = items.findIndex(w => w.name === wSel);
+  wSel = items[(i + d + items.length) % items.length].name;
+  workers(D.workers);
+}
+function workers(f) {
+  const el = $('workers'), items = f.ok ? f.items : [];
+  const asking = items.filter(w => w.state === 'waiting' || w.name === 'Jarvis').map(w => w.name);
+  const fresh = asking.find(n => !wAsked.has(n));
+  wAsked = new Set(asking);
+  let i = fresh ? items.findIndex(w => w.name === fresh) : Math.max(0, items.findIndex(w => w.name === wSel));
+  const w = items[i];
+  wSel = w ? w.name : '';
+  el.innerHTML = hd(el, 'JARVIS WORKERS', `${f.running ?? 0} running${f.waiting ? `, <span class="amber">${f.waiting} waiting on you</span>` : ''}`, f) +
+    (!w ? (f.ok ? '<div class="row mute" style="font:400 16px Barlow">No workers running.</div>' : '') : `
+    <div class="row" style="align-items:center;padding:0">${worker(w)}
+      ${items.length > 1 ? `<span style="display:flex;align-items:center;gap:8px;padding-right:12px">
+        <button class="nav" onclick="wStep(-1)" aria-label="Previous worker">‹</button>
+        <span class="t">${i + 1} of ${items.length}</span>
+        <button class="nav" onclick="wStep(1)" aria-label="Next worker">›</button></span>` : ''}
+    </div>
+    ${w.step && !w.need ? `<div class="row" style="padding:10px 12px">
+      <span class="mute" style="font:400 14px Barlow;flex:none">Doing now</span>
+      <span class="ell" style="font:500 16px Barlow;color:#e9f5f5;flex:1">${esc(w.step)}</span>
+      <span class="t">${esc(w.ago)}</span>
+    </div>` : ''}
+    <div class="row" style="flex-direction:column;gap:3px;padding:10px 12px">
+      <span class="mute" style="font:400 14px Barlow">${w.step ? 'Latest thought' : 'Doing now'}</span>
+      <span class="clamp" style="font:400 16px/1.35 Barlow;color:#c4d8d9;-webkit-line-clamp:${w.need ? 2 : 4}">${esc(w.doing)}</span>
+    </div>
+    ${w.need ? `<div class="row" style="flex-direction:column;gap:3px;padding:10px 12px">
+      <span class="amber" style="font:500 14px Barlow">Needs you</span>
+      <span class="clamp" style="font:500 17px/1.35 Barlow;color:#e9f5f5;-webkit-line-clamp:3">${esc(w.need)}</span>
+      <span class="amber" style="font:400 15px Barlow">${esc(w.todo)}</span>
+    </div>` : ''}`);
+}
+function worker(w) {                // spinner while it works, a still amber ring while it waits on you
+  const live = w.state !== 'waiting';
+  return link(w.href, 'row', `
+    <span style="position:relative;flex:none;width:44px;height:44px">
+    <svg width="44" height="44" viewBox="0 0 44 44" style="position:absolute;inset:0;overflow:visible">
+      <circle cx="22" cy="22" r="20.5" fill="none" stroke="rgba(110,200,205,.32)" stroke-width="2.5" pathLength="100" stroke-dasharray="0.6 4.4"/>
+      <circle cx="22" cy="22" r="16" fill="none" stroke="rgba(110,200,205,.14)" stroke-width="2.5"/>
+      ${live ? '' : `<circle cx="22" cy="22" r="16" fill="none" stroke="${A}" stroke-width="2.5"/>`}
+      <circle cx="22" cy="22" r="12" fill="none" stroke="rgba(110,200,205,.22)" stroke-width="0.75"/>
+    </svg>
+    ${live ? `<svg class="spin" data-dur="7" width="44" height="44" viewBox="0 0 44 44" style="position:absolute;inset:0;will-change:transform"><circle cx="22" cy="22" r="12" fill="none" stroke="${C}" stroke-width="1.5" pathLength="100" stroke-dasharray="18 82" stroke-opacity=".9"/></svg>` : ''}
+    </span>
+    <span style="display:flex;flex-direction:column;flex:1;min-width:0">
+      <span class="ell" style="font:500 18px Barlow;color:#e9f5f5">${esc(w.name)}</span>
+      <span class="ell ${live ? '' : 'amber'}" style="font:400 14px Barlow;${live ? 'color:#a7c0c1' : ''}">${{waiting: 'Waiting on you', starting: 'Starting'}[w.state] || 'Running'}, ${esc(w.t)} so far</span>
+    </span>`, 'flex:1;min-width:0;align-items:center;padding:6px 12px;border-top:0');
+}
+
+function twitch(f) {
+  const el = $('twitch'), items = f.ok ? f.items : [];
+  el.innerHTML = hd(el, 'LIVE ON TWITCH', `${items.length} of ${f.total ?? 0} followed`, f) + '<div id="twitchL"></div>';
+  $('twitchL').innerHTML = items.map(s => link(s.href, 'row', `
+    <span class="who cyan glow">${esc(s.name)}</span>
+    <span class="ell" style="font:400 15px Barlow;color:#a7c0c1;flex:1">${esc(s.game)}</span>
+    <span class="t" style="color:#c4d8d9">${esc(s.viewers)}</span>`, 'padding:6px 12px')).join('');
+  fit(el, $('twitchL'));
+}
+
+// ---------------------------------------------------------------- the day ring
+const ARC = (r, sweep) => `M${300 - r},300 A${r},${r} 0 1,${sweep} ${300 + r},300 A${r},${r} 0 1,${sweep} ${300 - r},300`;
+function label(deg, text, fill, top, bottom, anchor = 'middle', size = 13, font = 'Barlow') {
+  deg = (deg % 360 + 360) % 360;
+  const upper = deg > 270 || deg < 90;
+  const off = upper ? (deg + 90) % 360 / 3.6 : (270 - deg + 360) % 360 / 3.6;
+  return `<text text-anchor="${anchor}" fill="${fill}" style="font:500 ${size}px ${font}"><textPath href="#${upper ? top : bottom}" startOffset="${off.toFixed(1)}%">${text}</textPath></text>`;
+}
+function ring() {
+  const f = D.asana && D.asana.ok && !game() ? D.asana : {done: 0, overdue: 0, open: 0};
+  const cal = D.calendar && D.calendar.ok ? D.calendar : null;   // personal plans show in both modes
+  const now = new Date(), h = hours(now), start = game() ? h - h % 12 : DAY_START, day0 = now - (h - start) * 3.6e6;
+  const raw = t => (t - day0) / 3.6e6 * 30;                     // 30 degrees an hour
+  const hand = Math.max(0, Math.min(360, raw(now)));
+  // game mode is a 12-hour clock face: events in the coming 12 hours wrap round onto it
+  const ang = t => (a => game() && a >= 360 && a < hand + 360 ? a - 360 : a)(raw(t));
+  const n = f.done + f.overdue + f.open, seg = n ? 360 / n : 360;
+  const segs = [];
+  for (let i = 0; i < n; i++) {
+    const kind = i < f.done ? 'done' : i < f.done + f.overdue ? 'overdue' : 'open';
+    const stroke = {done: C, overdue: R, open: 'rgba(233,245,245,.18)'}[kind];
+    segs.push(`<circle cx="300" cy="300" r="200" fill="none" stroke="${stroke}" stroke-width="16" pathLength="360" stroke-dasharray="${n > 1 ? seg - 3 : 360} 360" stroke-dashoffset="${-(i * seg + (n > 1 ? 1.5 : 0))}" ${kind === 'done' ? 'filter="url(#jbloom)"' : ''}/>`);
+  }
+  const mid = (a, b) => (a + b) / 2 * seg;
+  const labels = [
+    f.done && label(mid(0, f.done), `${f.done} done`, C, 'rdTop', 'rdIn'),
+    f.overdue && label(mid(f.done, f.done + f.overdue), `${f.overdue} overdue`, R, 'rdTop', 'rdIn'),
+    f.open && label(mid(f.done + f.overdue, n), `${f.open} open`, '#a7c0c1', 'rdTop', 'rdIn'),
+  ].filter(Boolean);
+  const evs = cal ? cal.events : [], nowS = now / 1000;
+  const next = evs.find(e => e.end > nowS);
+  const marks = evs.map(e => {
+    const a = ang(e.start * 1000), b = a + (e.end - e.start) / 120;
+    if (b < 0 || a > 360) return '';
+    const s = Math.max(0, a), len = Math.max(3, Math.min(360, b) - s);
+    const bright = e === next, past = e.end < nowS;
+    return `<circle cx="300" cy="300" r="246" fill="none" stroke="${bright ? C : past ? 'rgba(79,216,228,.28)' : 'rgba(79,216,228,.55)'}" stroke-width="12" pathLength="360" stroke-dasharray="${len} ${360 - len}" stroke-dashoffset="${-s}" ${bright ? 'filter="url(#jbloom)"' : ''}/>`;
+  }).join('');
+  if (next && ang(next.start * 1000) >= 0 && ang(next.start * 1000) <= 360) {
+    const a = ang(next.start * 1000);
+    labels.push(label(a + 8, `<tspan fill="${C}" style="font-family:'JetBrains Mono';font-size:12px">${hm(new Date(next.start * 1000))}</tspan><tspan fill="#c4d8d9"> ${esc(next.title.slice(0, 32))}</tspan>`, '#c4d8d9', 'rdTop2', 'rdBot'));
+  }
+  labels.push(label(hand + (hand > 90 && hand < 270 ? -3 : 3), hm(now), '#f2fbfb', 'rdTop2', 'rdBot', 'start', 12, "'JetBrains Mono'"));
+  const ticks = [0, 3, 6, 9].map(h => game() ? pad(h || 12) : pad((start + h) % 24));
+  $('ring').innerHTML = `
+    <defs>
+      <filter id="jbloom" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <path id="rdTop" d="${ARC(220, 1)}"/><path id="rdTop2" d="${ARC(226, 1)}"/><path id="rdBot" d="${ARC(232, 0)}"/><path id="rdIn" d="${ARC(174, 0)}"/>
+    </defs>
+    <g transform="rotate(-90 300 300)">
+      <circle cx="300" cy="300" r="274" fill="none" stroke="rgba(79,216,228,.22)" stroke-width="5" pathLength="360" stroke-dasharray="0.3 7.2"/>
+      <circle cx="300" cy="300" r="274" fill="none" stroke="rgba(79,216,228,.7)" stroke-width="12" pathLength="360" stroke-dasharray="0.6 29.4" stroke-dashoffset="0.3" filter="url(#jbloom)"/>
+      <circle cx="300" cy="300" r="260" fill="none" stroke="rgba(79,216,228,.14)" stroke-width="1"/>
+      <circle cx="300" cy="300" r="260" fill="none" stroke="#4fd8e4" stroke-width="1.5" pathLength="360" stroke-dasharray="${hand} 360" filter="url(#jbloom)"/>
+      ${marks}
+      <circle cx="300" cy="300" r="212" fill="none" stroke="rgba(110,200,205,.38)" stroke-width="4" pathLength="360" stroke-dasharray="0.4 4.6"/>
+      ${n ? '' : '<circle cx="300" cy="300" r="200" fill="none" stroke="rgba(233,245,245,.10)" stroke-width="16"/>'}
+      ${segs.join('')}
+      <circle cx="300" cy="300" r="186" fill="none" stroke="rgba(110,200,205,.22)" stroke-width="0.75"/>
+    </g>
+    <line x1="300" y1="16" x2="300" y2="66" stroke="#f2fbfb" stroke-width="2" transform="rotate(${hand} 300 300)" filter="url(#jbloom)"/>
+    <text x="300" y="8" text-anchor="middle" fill="#7e9ea0" style="font:400 13px 'JetBrains Mono'">${ticks[0]}</text>
+    <text x="594" y="304" text-anchor="start" fill="#7e9ea0" style="font:400 13px 'JetBrains Mono'">${ticks[1]}</text>
+    <text x="300" y="604" text-anchor="middle" fill="#7e9ea0" style="font:400 13px 'JetBrains Mono'">${ticks[2]}</text>
+    <text x="6" y="304" text-anchor="end" fill="#7e9ea0" style="font:400 13px 'JetBrains Mono'">${ticks[3]}</text>
+    ${labels.join('')}`;
+  core(next, cal, f);
+}
+function core(next, cal, f) {
+  const el = $('core');
+  if (game()) return gameCore(el);
+  if (D.asana && D.asana.home) el.setAttribute('href', D.asana.home);
+  const n = f.done + f.overdue + f.open, nowS = Date.now() / 1000;
+  let call;
+  if (!cal) call = `<span style="font:400 14px Barlow;color:#7e9ea0">${D.calendar && D.calendar.ok === false ? 'Calendar unavailable' : 'Calendar not linked'}</span>`;
+  else if (!next) call = `<span style="font:400 14px Barlow;color:#7e9ea0">Nothing else today</span>`;
+  else call = `<span style="font:400 14px Barlow;color:#7e9ea0">${next.start > nowS ? 'Next up in' : 'Now'}</span>
+    <span id="countdown" class="cyan glow" style="font:500 30px/1.1 'JetBrains Mono'">${next.start > nowS ? mmss(next.start - nowS) : 'now'}</span>
+    <span class="ell" style="font:500 15px Barlow;color:#c4d8d9;max-width:280px">${esc(next.title)}</span>`;
+  el.innerHTML = `
+    <span style="display:flex;align-items:baseline;gap:4px"><span style="font:500 76px/1 'JetBrains Mono';color:#f2fbfb">${D.asana && D.asana.ok ? f.done : '-'}</span><span style="font:400 34px 'JetBrains Mono';color:#6c8a8c">/${n}</span></span>
+    <span style="font:500 17px Barlow;color:#a7c0c1">${D.asana && D.asana.ok === false ? 'Asana unavailable' : 'tasks done today'}</span>
+    ${f.overdue ? `<span class="red" style="font:500 16px Barlow">${f.overdue} overdue</span>` : ''}
+    <span style="width:160px;height:1px;background:rgba(110,200,205,.2);margin:12px 0 8px"></span>${call}
+    <span style="font:400 14px Barlow;color:#6c8a8c;margin-top:10px">Work mode</span>`;
+  core.next = next;
+}
+function gameCore(el) {             // game mode: who is around instead of tasks, plus the next calendar event
+  const nowS = Date.now() / 1000, next = D.calendar && D.calendar.ok ? D.calendar.events.find(e => e.end > nowS) : null;
+  const dc = D.discord && D.discord.ok ? D.discord.active : null, st = D.steam && D.steam.ok ? D.steam : null;
+  const playing = st ? st.friends.filter(g => g.playing).length : 0;
+  el.setAttribute('href', 'discord:///channels/@me');
+  el.innerHTML = `
+    <span style="font:500 76px/1 'JetBrains Mono';color:#f2fbfb">${dc ? dc.length : '-'}</span>
+    <span style="font:500 17px Barlow;color:#a7c0c1">${dc ? 'active on Discord' : 'Discord unavailable'}</span>
+    <span style="width:160px;height:1px;background:rgba(110,200,205,.2);margin:12px 0 8px"></span>
+    <span class="cyan glow" style="font:500 30px/1.1 'JetBrains Mono'">${st ? st.online : '-'}</span>
+    <span style="font:400 14px Barlow;color:#7e9ea0">${st ? `on Steam${playing ? `, ${playing} in a game` : ''}` : 'Steam unavailable'}</span>
+    ${next ? `<span style="font:400 14px Barlow;color:#7e9ea0;margin-top:8px">${next.start > nowS ? `Next up in <span id="countdown" class="cyan">${mmss(next.start - nowS)}</span>` : 'Now'}</span>
+    <span class="ell" style="font:500 15px Barlow;color:#c4d8d9;max-width:280px">${esc(next.title)}</span>` : ''}
+    <span style="font:400 14px Barlow;color:#6c8a8c;margin-top:10px">Game mode</span>`;
+  core.next = next;
+}
+
+// ---------------------------------------------------------------- system strip
+function system(f) {
+  const bar = (name, v) => `<span style="display:flex;align-items:center;gap:8px;font:400 14px Barlow;color:#a7c0c1">${name} <span class="bar"><i style="width:${v ?? 0}%"></i></span><span class="mono" style="font-size:13px;color:#e9f5f5;width:36px;text-align:right">${v == null ? '-' : v + '%'}</span></span>`;
+  $('load').innerHTML = f.ok ? bar('CPU', f.cpu) + bar('GPU', f.gpu) : '<span class="mute" style="font:400 14px Barlow">unavailable</span>';
+  const m = f.ok && f.music;
+  system.music = m ? {...m, at: Date.now() / 1000} : null;
+  const el = $('music');
+  if (m && m.href) el.setAttribute('href', m.href); else el.removeAttribute('href');
+  el.innerHTML = m ? `
+    <span style="display:flex;flex-direction:column;gap:1px;flex:1;min-width:0">
+      <span class="ell" style="font:500 16px Barlow;color:#e9f5f5">${esc(m.title)}</span>
+      <span class="ell" style="font:400 14px Barlow;color:#a7c0c1">${esc(m.artist) || (m.playing ? 'Playing' : 'Paused')}</span>
+    </span>
+    <span class="t" id="mpos"></span><span style="width:180px;height:2px;background:rgba(110,200,205,.15)"><i id="mbar" style="display:block;height:2px;background:#4fd8e4"></i></span>
+    <span class="t">${m.len ? mmss(m.len) : ''}</span>` : `<span class="mute" style="font:400 15px Barlow">${f.ok ? 'Nothing playing' : 'Music unavailable'}</span>`;
+  tick();
+}
+function weather(f) {
+  $('temp').textContent = f.ok ? f.temp + '°' : '';
+  $('wx').textContent = f.ok ? `${f.desc}, high ${f.high}°` : 'Weather unavailable';
+}
+
+function tick() {
+  const now = new Date();
+  $('clock').textContent = hm(now);
+  $('date').textContent = fmt(now, {weekday: 'long'}) + ', ' + fmt(now, {day: 'numeric', month: 'long'});
+  const cd = $('countdown'), nx = core.next;
+  if (cd && nx) {
+    const left = nx.start - now / 1000;
+    if (left > 0) cd.textContent = mmss(left); else ring();
+  }
+  const m = system.music;
+  if (m && $('mpos')) {
+    const pos = Math.min(m.len || Infinity, m.pos + (m.playing ? now / 1000 - m.at : 0));
+    $('mpos').textContent = mmss(pos);
+    $('mbar').style.width = m.len ? (pos / m.len * 100).toFixed(1) + '%' : '0';
+  }
+  if (now.getSeconds() === 0) { ring(); today(); }
+}
+
+const RENDER = {slack, steam, discord, workers, twitch, system, weather, asana: () => { ring(); today(); }, calendar: () => { ring(); today(); },
+  mode: f => {                      // switch layout, then redraw everything into it
+    document.body.classList.toggle('game', f.mode === 'game');
+    TZ = f.tz;
+    for (const k in D) if (k !== 'mode') feed(k, D[k]);
+    ring();
+  }};
+function feed(name, data) {
+  D[name] = data;
+  try { RENDER[name](data); } catch (e) { console.log('render ' + name + ': ' + e); }
+}
+
+// background star field around the ring (seeded, so it never jumps)
+(() => {
+  let seed = 7; const rnd = () => (seed = seed * 16807 % 2147483647) / 2147483647;
+  const out = [];
+  for (let i = 0; i < 420 && out.length < 110; i++) {
+    const a = rnd() * Math.PI * 2, r = 285 + Math.pow(rnd(), 0.8) * 230;
+    const x = 960 + Math.cos(a) * r, y = 360 + Math.sin(a) * r * 0.92;
+    if (x < 606 || x > 1314 || y < 8 || y > 700) continue;
+    const s = rnd() < 0.15 ? 2.5 : 1.5;
+    out.push(`<span class="dot" style="left:${x.toFixed(1)}px;top:${y.toFixed(1)}px;width:${s}px;height:${s}px;opacity:${(0.12 + rnd() * 0.4).toFixed(2)}"></span>`);
+  }
+  $('dots').innerHTML = out.join('');
+})();
+// spinners tick once a second, mechanical (steps), on the compositor (CSS transform animation on their own layer, no repaint of the blurred ring);
+// phase comes from the clock so re-rendered spinners don't jump back to 0
+function spin() {
+  const t = performance.now() / 1000;
+  for (const el of document.querySelectorAll('.spin:not([style*="animation"])')) {
+    const d = +el.dataset.dur;
+    el.style.animation = `spin ${d}s steps(${d}) ${-(t % d).toFixed(2)}s infinite`;
+  }
+}
+// every link is opened by jarvis_os.py (link_cmd), through xdg-open
+document.addEventListener('click', e => {
+  const a = e.target.closest('a[href]');
+  if (!a) return;
+  e.preventDefault();
+  console.log('jarvis-os:open ' + a.getAttribute('href'));
+});
+ring();
+tick();
+setInterval(tick, 1000);
+setInterval(spin, 250);
+</script>
+</body>
+</html>

@@ -1,10 +1,8 @@
-"""Text-to-speech (Kokoro, a Piper voice, or an OpenAI-compatible speech endpoint) with a playback buffer that can be cut off instantly."""
+"""Text-to-speech (Kokoro, or a Piper voice) with a playback buffer that can be cut off instantly."""
 import asyncio
-import json
 import logging
 import re
 import threading
-import urllib.request
 
 import numpy as np
 import sounddevice as sd
@@ -50,8 +48,7 @@ class SentenceSplitter:
         self.in_code = False
 
     def feed(self, delta):
-        # a reasoning model's <think> part is skipped like a code block
-        self.buf = (self.buf + delta).replace("<think>", "```").replace("</think>", "```")
+        self.buf += delta
         out = []
         while True:
             if "```" in self.buf:
@@ -72,8 +69,7 @@ class SentenceSplitter:
 
     def flush(self):
         rest, self.buf = self.buf, ""
-        in_code, self.in_code = self.in_code, False       # an unclosed ``` or <think> doesn't mute the next reply
-        return [] if in_code else self._sentences(rest, final=True)
+        return [] if self.in_code else self._sentences(rest, final=True)
 
     @staticmethod
     def _sentences(text, final):
@@ -86,7 +82,7 @@ class Mouth:
         if config.VOICE_ENGINE == "piper":
             from piper import PiperVoice
             self.piper = PiperVoice.load(config.PIPER_MODEL)
-        elif config.VOICE_ENGINE == "kokoro":
+        else:
             self.kokoro = Kokoro(config.KOKORO_MODEL, config.KOKORO_VOICES)
         self.lock = threading.Lock()
         self.chunks = []          # audio waiting to play
@@ -96,6 +92,8 @@ class Mouth:
         self.synthesizing = False
         self.out_level = 0.0
         self.on_sentence_start = None     # called (in the event loop) as each sentence starts playing
+        self.hold = None                  # async (token, text): unprompted speech waits on this before it plays
+        self.polite = False               # the sentence in hand is unprompted
         self.stream = sd.OutputStream(samplerate=RATE, channels=1, dtype="float32",
                                       blocksize=1024, callback=self._callback)
 
@@ -127,11 +125,12 @@ class Mouth:
     def chime(self, name):
         self._enqueue_audio(CHIMES[name])
 
-    def say(self, text):
+    def say(self, text, polite=None):
+        """polite: a token for unprompted speech (one per update), so it waits on self.hold first."""
         text = speakable(text)
         if text:
             log.info("say: %s", text)
-            self.textq.put_nowait((self.generation, text))
+            self.textq.put_nowait((self.generation, text, polite))
 
     def stop(self):
         self.generation += 1
@@ -142,24 +141,19 @@ class Mouth:
             self.pos = 0
 
     @property
-    def busy(self):
+    def playing(self):
         with self.lock:
-            playing = bool(self.chunks)
-        return playing or self.synthesizing or not self.textq.empty()
+            return bool(self.chunks)
+
+    @property
+    def busy(self):
+        return self.playing or self.synthesizing or not self.textq.empty()
 
     async def wait_done(self):
         while self.busy:
             await asyncio.sleep(0.05)
 
     def _synth(self, text):
-        if config.VOICE_ENGINE == "openai":
-            body = {"model": config.TTS_MODEL, "input": text, "voice": config.VOICE, "speed": config.SPEED,
-                    "response_format": "pcm"}            # raw 24 kHz 16-bit mono, the stream's own rate
-            headers = {"Content-Type": "application/json"} | (
-                {"Authorization": f"Bearer {config.TTS_API_KEY}"} if config.TTS_API_KEY else {})
-            req = urllib.request.Request(config.TTS_BASE_URL.rstrip("/") + "/audio/speech", json.dumps(body).encode(), headers)
-            with urllib.request.urlopen(req, timeout=60) as r:
-                return np.frombuffer(r.read(), dtype=np.int16).astype(np.float32) / 32768
         if config.VOICE_ENGINE != "piper":
             return self.kokoro.create(text, voice=config.VOICE, speed=config.SPEED, lang="en-gb")[0]
         audio = np.concatenate([c.audio_float_array for c in self.piper.synthesize(text)])
@@ -167,12 +161,14 @@ class Mouth:
 
     async def _worker(self):
         while True:
-            gen, text = await self.textq.get()
+            gen, text, polite = await self.textq.get()
             if gen != self.generation:
                 continue
-            self.synthesizing = True
+            self.synthesizing, self.polite = True, polite is not None
             try:
                 audio = await self.loop.run_in_executor(None, self._synth, text)
+                if self.polite and self.hold:
+                    await self.hold(polite, text)
                 if gen == self.generation:
                     self._enqueue_audio(audio.astype(np.float32), text)
             except Exception:

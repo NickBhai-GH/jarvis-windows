@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Talk to a running Jarvis without your voice.
+
+  jarvisctl listen            same as saying "hey jarvis" (bind this to a hotkey)
+  jarvisctl stop              shut up / cancel what you're doing
+  jarvisctl say open spotify  type a command instead of speaking it
+  jarvisctl yes | no          answer a confirmation question
+  jarvisctl speak hello       just say something out loud (voice test)
+  jarvisctl status
+"""
+import json
+import os
+import socket
+import sys
+import tempfile
+
+if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+    print(__doc__.strip())
+    sys.exit(0)
+cmd, rest = sys.argv[1], " ".join(sys.argv[2:])
+req = {"cmd": cmd}
+if cmd in ("say", "speak"):
+    if not rest:
+        sys.exit(f"jarvisctl {cmd} needs some text")
+    req["text"] = rest
+runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+try:
+    if sys.platform == "win32":             # no unix sockets: localhost port + the token file Jarvis writes at start
+        with open(os.path.join(runtime, "jarvis-ctl.token")) as f:
+            req["token"] = f.read().strip()
+        s = socket.create_connection(("127.0.0.1", 8766), timeout=5)
+    else:
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(os.path.join(runtime, "jarvis.sock"))
+except OSError:
+    sys.exit("Jarvis isn't running.")
+s.sendall((json.dumps(req) + "\n").encode())
+print(s.makefile().readline().strip())

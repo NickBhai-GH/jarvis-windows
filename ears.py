@@ -1,13 +1,13 @@
 """Microphone, wake word, end-of-speech detection and speech-to-text."""
 import asyncio
 import collections
-import io
+import json
 import logging
 import os
 import re
-import wave
+import subprocess
+import time
 
-import aiohttp
 import numpy as np
 import openwakeword
 import sounddevice as sd
@@ -24,25 +24,6 @@ FRAME_S = FRAME / RATE
 
 # Whisper invents these on silence or noise
 JUNK = re.compile(r"^\W*(thank you|thanks for watching|you|bye|\.+|okay)?\W*$", re.I)
-NEAR_MISS = 0.05        # wake scores above this get logged, so a tester can see how close "hey jarvis" came
-
-
-def describe(i):
-    d = sd.query_devices(i)
-    return f"[{i}] {d['name']} ({sd.query_hostapis(d['hostapi'])['name']}, {d['default_samplerate']:.0f} Hz, " \
-           f"{d['max_input_channels']} ch)"
-
-
-def pick_mic(want):
-    """MIC_DEVICE -> a device number. On Windows each mic is listed once per audio API (MME, DirectSound, WASAPI,
-    WDM-KS), so a name matches several; prefer MME, which records at 16 kHz and lets Windows do the resampling."""
-    if want is None or isinstance(want, int):
-        return want
-    found = [i for i, d in enumerate(sd.query_devices())
-             if d["max_input_channels"] > 0 and str(want).lower() in d["name"].lower()]
-    if not found:
-        raise ValueError(f"no microphone matches MIC_DEVICE = {want!r} (the inputs are listed in logs/jarvis.log)")
-    return min(found, key=lambda i: "MME" not in sd.query_hostapis(sd.query_devices(i)["hostapi"])["name"])
 
 
 class Recorder:
@@ -87,51 +68,41 @@ class Ears:
         self.vad = VAD()
         self.last_score = 0.0
         self.mic_name = "?"
-        if config.STT_ENGINE == "whisper":
-            self.whisper = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
-            self.fast = WhisperModel("base.en", device="cpu", compute_type="int8")   # rough live text while you talk
-        self.peak = self.peak_level = 0.0
-        self.dropped = 0                 # audio blocks lost (the mic overflowed, or Jarvis fell behind)
-        log.info("microphones: %s", "; ".join(describe(i) for i, d in enumerate(sd.query_devices())
-                                              if d["max_input_channels"] > 0))
-        self.device = pick_mic(config.MIC_DEVICE)
-        info = sd.query_devices(self.device, kind="input")
-        api = sd.query_hostapis(info["hostapi"])["name"]
-        self.mic_name = f"{info['name']} ({api})"
-        # WASAPI refuses 16 kHz unless Windows is allowed to convert; MME and DirectSound convert anyway.
-        extra = sd.WasapiSettings(auto_convert=True) if "WASAPI" in api else None
+        self.whisper = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
+        self.fast = WhisperModel("base.en", device="cpu", compute_type="int8")   # rough live text while you talk
         self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=FRAME,
-                                     device=self.device, extra_settings=extra, callback=self._callback)
+                                     device=config.MIC_DEVICE, callback=self._callback)
 
     def start(self):
         self.stream.start()
-        log.info("mic open: %s, native %.0f Hz, recording %d Hz mono; wake threshold %.2f",
-                 describe(self.stream.device), sd.query_devices(self.stream.device)["default_samplerate"], RATE,
-                 config.WAKE_THRESHOLD)
+        self.mic_name = str(config.MIC_DEVICE) if config.MIC_DEVICE is not None else self._default_source()
+        log.info("mic open: %s", self.mic_name)
+
+    @staticmethod
+    def _default_source():
+        if config.WINDOWS:
+            return sd.query_devices(kind="input")["name"]
+        try:
+            name = subprocess.run(["pactl", "get-default-source"], capture_output=True, text=True).stdout.strip()
+            srcs = json.loads(subprocess.run(["pactl", "--format=json", "list", "sources"],
+                                             capture_output=True, text=True).stdout)
+            return next((x["description"] for x in srcs if x["name"] == name), name)
+        except Exception:
+            return "system default"
 
     def _callback(self, indata, frames, t, status):
-        if status.input_overflow:
-            self.dropped += 1
         self.loop.call_soon_threadsafe(self._put, indata[:, 0].copy())
 
     def _put(self, chunk):
         if self.q.full():
             self.q.get_nowait()
-            self.dropped += 1
         self.q.put_nowait(chunk)
 
     def heard_wake_word(self, chunk):
         score = max(self.oww.predict(chunk).values())
         self.last_score = score
-        if score >= NEAR_MISS:           # one log line per attempt: its best score and how loud the mic was
-            self.peak = max(self.peak, score)
-            self.peak_level = max(self.peak_level, float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) / 32768)
-        if score >= config.WAKE_THRESHOLD or (self.peak and score < NEAR_MISS):
-            log.info("wake score %.2f (threshold %.2f): %s; mic level %d%%, %d audio blocks dropped so far",
-                     self.peak, config.WAKE_THRESHOLD, "woke" if score >= config.WAKE_THRESHOLD else "missed",
-                     min(100, self.peak_level * 800), self.dropped)
-            self.peak = self.peak_level = 0.0
         if score >= config.WAKE_THRESHOLD:
+            log.info("wake word (%.2f)", score)
             self.reset_wake()
             return True
         return False
@@ -143,9 +114,6 @@ class Ears:
         return Recorder(self.vad, wait_for_speech)
 
     async def partial(self, audio):
-        if config.STT_ENGINE != "whisper":
-            return ""                            # no live text from a remote service
-
         def run():
             segs, _ = self.fast.transcribe(audio.astype(np.float32) / 32768.0, language="en", beam_size=1,
                                            without_timestamps=True, initial_prompt=config.VOCAB)
@@ -153,39 +121,81 @@ class Ears:
         text = await self.loop.run_in_executor(None, run)
         return "" if JUNK.match(text) else text
 
-    async def transcribe(self, audio):
-        if config.STT_ENGINE == "openai":
-            text = await self._remote(audio)
-            return "" if JUNK.match(text) else text
-
+    async def transcribe(self, audio, answer=False):
+        """answer: the user is answering a yes/no, where a lone "okay" is a real yes, not whisper junk."""
         def run():
             segs, _ = self.whisper.transcribe(audio.astype(np.float32) / 32768.0, language="en",
                                               beam_size=1, vad_filter=True,
                                               initial_prompt=config.VOCAB)
             return " ".join(s.text for s in segs).strip()
         text = await self.loop.run_in_executor(None, run)
+        if answer and re.fullmatch(r"\W*ok(ay)?\W*", text, re.I):
+            return text
         return "" if JUNK.match(text) else text
 
+
+def _pactl(what):
+    return json.loads(subprocess.run(["pactl", "--format=json", "list", what], capture_output=True, text=True,
+                                     timeout=3).stdout)
+
+
+class CallWatch:
+    """Is the user on a call, and are the other people talking? apps: other apps capturing a real mic (Discord, Zoom,
+    Chrome for Meet), not Jarvis and not a monitor. last_heard: when one of those apps' playback streams was last
+    louder than POLITE_CALL_LEVEL (a parec monitor per stream, so music and Jarvis's own voice don't count).
+    The monitors run while Jarvis keeps calling update() and close themselves 10 s after the last call."""
+
+    def __init__(self):
+        self.apps, self.last_heard, self.since, self.asked = [], 0.0, 0.0, 0.0
+        self.readers = {}                            # sink-input index -> task following its loudness
+
     @staticmethod
-    async def _remote(audio):
-        """Any OpenAI-compatible /audio/transcriptions endpoint (OpenAI, Groq, a local whisper server...)."""
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(RATE)
-            w.writeframes(audio.tobytes())
-        form = aiohttp.FormData()
-        form.add_field("file", buf.getvalue(), filename="speech.wav", content_type="audio/wav")
-        for k, v in (("model", config.STT_MODEL), ("language", "en"), ("prompt", config.VOCAB)):
-            form.add_field(k, v)
-        headers = {"Authorization": f"Bearer {config.STT_API_KEY}"} if config.STT_API_KEY else {}
+    def scan(pa=_pactl):
+        """(names of other apps holding a mic, indexes of their playback streams). Any failure = not on a call."""
+        if config.WINDOWS:
+            return [], []        # ponytail: PulseAudio only; Windows could read pycaw capture sessions + session peak meters
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s, \
-                    s.post(config.STT_BASE_URL.rstrip("/") + "/audio/transcriptions", data=form, headers=headers) as r:
-                if r.status != 200:
-                    raise RuntimeError(f"{r.status}: {(await r.text())[:300]}")
-                return (await r.json())["text"].strip()
+            clients = {str(c["index"]): c["properties"] for c in pa("clients")}
+
+            def who(o):                              # Jarvis's own streams only carry the pid on their client
+                p = o["properties"] if "application.process.id" in o["properties"] else clients.get(str(o["client"]), {})
+                return p.get("application.process.binary") or p.get("application.name", "?"), p.get("application.process.id")
+            mics = {s["index"] for s in pa("sources") if not s.get("monitor_source")}
+            takers = [o for o in pa("source-outputs") if o["source"] in mics and not o.get("corked")
+                      and who(o)[1] != str(os.getpid())]
+            callers = {who(o) for o in takers}       # (binary, pid): flatpak pids alone can repeat across apps
+            streams = [o["index"] for o in pa("sink-inputs") if who(o) in callers and not o.get("corked")]
+            return sorted({name for name, _ in callers}), streams
         except Exception:
-            log.exception("speech to text failed")
-            return ""
+            log.exception("call check failed")
+            return [], []
+
+    async def update(self):
+        self.asked = time.time()
+        self.apps, streams = await asyncio.get_running_loop().run_in_executor(None, self.scan)
+        self.readers = {i: t for i, t in self.readers.items() if not t.done()}
+        for i in streams:
+            if i not in self.readers:
+                if not self.readers:
+                    self.since = time.time()         # fresh ears on the call: hear QUIET_S of it before trusting it
+                self.readers[i] = asyncio.create_task(self._follow(i))
+
+    async def _follow(self, index):
+        proc = await asyncio.create_subprocess_exec(
+            "parec", f"--monitor-stream={index}", "--format=s16le", "--rate=8000", "--channels=1",
+            "--latency-msec=100", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            while time.time() - self.asked < 10:
+                try:
+                    data = await asyncio.wait_for(proc.stdout.readexactly(1600), 1)   # 100 ms of audio
+                except asyncio.TimeoutError:
+                    continue                         # a paused stream sends nothing
+                except asyncio.IncompleteReadError:
+                    break                            # the stream ended
+                a = np.frombuffer(data, np.int16).astype(np.float32)
+                if np.sqrt(np.mean(a * a)) > config.POLITE_CALL_LEVEL:
+                    self.last_heard = time.time()
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
