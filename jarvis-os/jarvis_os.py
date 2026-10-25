@@ -7,6 +7,7 @@ Asana, Steam and Twitch helpers only ever issue GETs, and the optional Discord l
 token, see README) only receives gateway events (it never sends a message, reaction, typing, status or any REST write).
 Credentials live in ~/.config/jarvis-os, one file each; any that is missing shows faded sample data instead.
 """
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -569,7 +570,7 @@ def system():
 
 def music():
     if WINDOWS:
-        return None            # ponytail: MPRIS only; Windows needs the WinRT media-session API (winrt package)
+        return asyncio.run(win_music())
     names =subprocess.run(["busctl", "--user", "list", "--no-legend"], capture_output=True, text=True, timeout=5).stdout
     best = None
     for n in re.findall(r"^(org\.mpris\.MediaPlayer2\.\S+)", names, re.M):
@@ -589,6 +590,27 @@ def music():
              "len": (meta.get("mpris:length") or 0) / 1e6, "pos": pos / 1e6, "playing": status == "Playing",
              "href": "spotify:" if "spotify" in n else ""}
         if not best or (p["playing"], "spotify" in n) > (best["playing"], False):
+            best = p
+    return best
+
+
+async def win_music():
+    """Windows' own media sessions (what the volume flyout shows): same shape as the MPRIS one, playing + Spotify first."""
+    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as Sessions
+    best = None
+    for s in (await Sessions.request_async()).get_sessions():
+        meta = await s.try_get_media_properties_async()
+        if not meta or not meta.title:
+            continue
+        t, app = s.get_timeline_properties(), s.source_app_user_model_id.lower()
+        playing = s.get_playback_info().playback_status == 4        # 4 = Playing
+        pos = t.position.total_seconds()
+        if playing:                # apps only report position now and then; add the time since that report
+            pos += (dt.datetime.now(dt.timezone.utc) - t.last_updated_time).total_seconds()
+        p = {"title": meta.title, "artist": meta.artist or "", "len": t.end_time.total_seconds(),
+             "pos": min(pos, t.end_time.total_seconds()), "playing": playing,
+             "href": "spotify:" if "spotify" in app else ""}
+        if not best or (p["playing"], "spotify" in app) > (best["playing"], False):
             best = p
     return best
 

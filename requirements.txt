@@ -14,5 +14,9 @@ pynput==1.8.2
 pycaw==20260927
 tzlocal==5.4.5
 tzdata==2026.5
+# JARVIS OS "now playing" on Windows (the system media sessions)
+winrt-runtime==4.0.3
+winrt-Windows.Media.Control==4!10.0.28000.2705
+winrt-Windows.Foundation==4!10.0.28000.2705
 # optional, only for VOICE_ENGINE = "piper"
 piper-tts==1.8.0
